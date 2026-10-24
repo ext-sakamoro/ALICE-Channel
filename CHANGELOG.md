@@ -28,6 +28,7 @@ All notable changes to ALICE-Channel are documented here. While crates.io is fro
 
 ### Changed
 
+- 試験: async の `accept_with_timeout` の試験 3 本は await を外側の `tokio::time::timeout` で包む accept が期限を守らなければ数秒で失敗する (以前は job の上限まで終わらなかった)
 - README の licence の節を `LicenseRef-Proprietary` の一文と問い合わせ先にした
 - alice-identity を path でなく git の rev (公開 repo の root) で取るようにした clone 1 つで build でき、CI は隣の checkout と deploy key を使わない
 

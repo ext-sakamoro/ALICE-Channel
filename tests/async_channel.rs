@@ -380,7 +380,13 @@ async fn a_confirmation_frame_of_another_length_is_refused_before_its_body() {
     // announce a 65 535-byte confirmation and send nothing more
     let liar = tokio::spawn(raw_initiator(a, rs, sa, u16::MAX.to_be_bytes().to_vec()));
     let start = std::time::Instant::now();
-    let r = AsyncSecureChannel::accept_with_timeout(sb, &b.cred, &pb, Duration::from_secs(2)).await;
+    // the outer timeout fails the test in seconds if accept ignores its deadline
+    let r = timeout(
+        Duration::from_secs(10),
+        AsyncSecureChannel::accept_with_timeout(sb, &b.cred, &pb, Duration::from_secs(2)),
+    )
+    .await
+    .expect("accept did not return");
     assert!(
         matches!(r, Err(ChannelError::Noise(NoiseError::Decrypt))),
         "{:?}",
@@ -399,8 +405,13 @@ async fn accept_gives_up_on_an_initiator_that_never_confirms() {
     let rs = b.cred.noise_static_public();
     let silent = tokio::spawn(raw_initiator(a, rs, sa, Vec::new()));
     let start = std::time::Instant::now();
-    let r =
-        AsyncSecureChannel::accept_with_timeout(sb, &b.cred, &pb, Duration::from_millis(300)).await;
+    // the outer timeout fails the test in seconds if accept ignores its deadline
+    let r = timeout(
+        Duration::from_secs(5),
+        AsyncSecureChannel::accept_with_timeout(sb, &b.cred, &pb, Duration::from_millis(300)),
+    )
+    .await
+    .expect("accept did not return");
     assert!(matches!(r, Err(ChannelError::Timeout)), "{:?}", r.err());
     assert!(start.elapsed() < Duration::from_millis(1_200));
     silent.abort();
@@ -568,8 +579,13 @@ async fn accept_drops_a_silent_dialer_at_the_deadline() {
     let (mut sa, sb) = duplex(64 * 1024);
     let pb = knowing(&[]);
     let start = std::time::Instant::now();
-    let r =
-        AsyncSecureChannel::accept_with_timeout(sb, &b.cred, &pb, Duration::from_millis(300)).await;
+    // the outer timeout fails the test in seconds if accept ignores its deadline
+    let r = timeout(
+        Duration::from_secs(5),
+        AsyncSecureChannel::accept_with_timeout(sb, &b.cred, &pb, Duration::from_millis(300)),
+    )
+    .await
+    .expect("accept did not return");
     assert!(matches!(r, Err(ChannelError::Timeout)), "{:?}", r.err());
     assert!(start.elapsed() < Duration::from_millis(1_200));
     // the responder's side is gone and nothing was written
