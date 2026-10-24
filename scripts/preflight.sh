@@ -250,6 +250,7 @@ need() { command -v "$1" >/dev/null 2>&1 || { echo "missing tool: $1 ($2)" >&2; 
 has_toolchain() { grep -q "^$1" <<<"$(rustup toolchain list)"; }
 
 need actionlint "brew install actionlint"
+has_toolchain 1.88 || { echo "missing toolchain 1.88 (rustup toolchain install 1.88)" >&2; exit 1; }
 
 step "ci.yml / fmt: Check formatting"
 ( export CARGO_TERM_COLOR="always"; cargo fmt -- --check )
@@ -267,6 +268,14 @@ step "ci.yml / doc: Doc"
 
 step "ci.yml / doc: Doc (feature async)"
 ( export CARGO_TERM_COLOR="always" RUSTDOCFLAGS="-Dwarnings"; cargo doc --locked --no-deps --features async )
+
+step "ci.yml / msrv: Check on the declared rust-version"
+(
+  export CARGO_TERM_COLOR="always"
+  v=$(cargo +1.88 --version)
+  case "$v" in "cargo 1.88."*) ;; *) echo "::error::not cargo +1.88 1.88: $v"; exit 1 ;; esac
+  cargo +1.88 check --all-features
+)
 
 step "ci.yml / actionlint: actionlint"
 actionlint .github/workflows/*.yml

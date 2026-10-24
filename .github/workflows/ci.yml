@@ -110,6 +110,19 @@ jobs:
         env:
           RUSTDOCFLAGS: "-Dwarnings"
 
+  msrv:
+    name: MSRV (rust-version 1.88)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@1.88
+      # `cargo +1.88`: rust-toolchain.toml would otherwise select the pinned toolchain for plain `cargo`
+      - name: Check on the declared rust-version
+        run: |
+          v=$(cargo +1.88 --version)
+          case "$v" in "cargo 1.88."*) ;; *) echo "::error::not cargo 1.88: $v"; exit 1 ;; esac
+          cargo +1.88 check --all-features
+
   actionlint:
     name: actionlint
     runs-on: ubuntu-latest
