@@ -1,0 +1,122 @@
+name: CI
+
+# fmt / clippy (all targets, -D warnings) / test (with a floor on the passed-test count) / doc / actionlint
+# alice-crypto, alice-identity and alice-sign are pinned by git rev in Cargo.toml: cargo fetches them
+
+on:
+  push:
+    # ci/**: the same checks on a branch before it is fast-forwarded to main
+    branches: [main, 'ci/**']
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+# a newer commit on the same branch stops the older run; on main every commit
+# gets its own group and is not stopped
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref == 'refs/heads/main' && github.sha || github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  fmt:
+    name: Format
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - name: Check formatting
+        run: cargo fmt -- --check
+
+  clippy:
+    name: Clippy (all targets, -D warnings)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: Clippy
+        run: cargo clippy --locked --all-targets -- -D warnings
+      - name: Clippy (feature async)
+        run: cargo clippy --locked --all-targets --features async -- -D warnings
+
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+    env:
+      # the passed-test count at the commit that set it; fewer passed tests (a removed or
+      # skipped test, or none at all) is a failure
+      MIN_PASSED: "26"
+      # with the async feature: the same tests plus tests/async_channel.rs
+      MIN_PASSED_ASYNC: "39"
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Test (lib, integration, doctests)
+        run: |
+          # the default shell has no pipefail: without it cargo's exit status is lost in the pipe
+          set -o pipefail
+          log="$(mktemp)"
+          cargo test --locked 2>&1 | tee "${log}"
+          passed=$(grep -E '^test result: ' "${log}" | awk '{s += $4} END {print s + 0}')
+          failed=$(grep -E '^test result: ' "${log}" | awk '{s += $6} END {print s + 0}')
+          echo "passed: ${passed} (minimum ${MIN_PASSED}), failed: ${failed}"
+          if [ "${failed}" -ne 0 ] || grep -E '^test result: ' "${log}" | grep -vE '^test result: ok\. ' >/dev/null; then
+            echo "::error::${failed} tests failed"
+            exit 1
+          fi
+          if [ "${passed}" -lt "${MIN_PASSED}" ]; then
+            echo "::error::${passed} tests passed, fewer than ${MIN_PASSED}"
+            exit 1
+          fi
+
+      - name: Test (feature async)
+        run: |
+          set -o pipefail
+          log="$(mktemp)"
+          cargo test --locked --features async 2>&1 | tee "${log}"
+          passed=$(grep -E '^test result: ' "${log}" | awk '{s += $4} END {print s + 0}')
+          failed=$(grep -E '^test result: ' "${log}" | awk '{s += $6} END {print s + 0}')
+          echo "passed: ${passed} (minimum ${MIN_PASSED_ASYNC}), failed: ${failed}"
+          if [ "${failed}" -ne 0 ] || grep -E '^test result: ' "${log}" | grep -vE '^test result: ok\. ' >/dev/null; then
+            echo "::error::${failed} tests failed"
+            exit 1
+          fi
+          if [ "${passed}" -lt "${MIN_PASSED_ASYNC}" ]; then
+            echo "::error::${passed} tests passed, fewer than ${MIN_PASSED_ASYNC}"
+            exit 1
+          fi
+
+  doc:
+    name: Doc (warnings are errors)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Doc
+        run: cargo doc --locked --no-deps
+        env:
+          RUSTDOCFLAGS: "-Dwarnings"
+      - name: Doc (feature async)
+        run: cargo doc --locked --no-deps --features async
+        env:
+          RUSTDOCFLAGS: "-Dwarnings"
+
+  actionlint:
+    name: actionlint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: Run actionlint
+        uses: reviewdog/action-actionlint@v1
+        with:
+          fail_level: error
+          reporter: github-check

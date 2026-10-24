@@ -1,0 +1,26 @@
+[package]
+name = "alice-channel"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.92"
+license = "LicenseRef-Proprietary"
+publish = false
+description = "Mutually authenticated, encrypted channels between certified devices: the Noise XX handshake with each side's static key bound to its device certificate"
+repository = "https://github.com/ext-sakamoro/ALICE-Channel"
+authors = ["Moroya Sakamoto"]
+
+[dependencies]
+# X25519, SHA-256 / HMAC / HKDF and ChaCha20-Poly1305 (RFC 8439), taken by git at a full commit
+alice-crypto = { version = "0.6.0", git = "https://github.com/ext-sakamoro/ALICE-Crypto", rev = "7fd119db2215c01eeeab431bd32a01f9791356c6" }
+alice-identity = { version = "1.2.0", git = "https://github.com/ext-sakamoro/ALICE-Identity", rev = "c32a873238a11c7dc0d878aa9cfb7db871ab4c0b" }
+alice-sign = { version = "0.1", git = "https://github.com/ext-sakamoro/ALICE-Sign", rev = "8a1b00d800082187a8693732a9ffb806c98814e7" }
+zeroize = { version = "1", features = ["zeroize_derive"] }
+# the async channel (feature `async`)
+tokio = { version = "1", default-features = false, features = ["io-util", "time"], optional = true }
+
+[features]
+async = ["dep:tokio"]
+
+[dev-dependencies]
+serde_json = "1"
+tokio = { version = "1", features = ["io-util", "time", "rt", "rt-multi-thread", "macros", "sync"] }
