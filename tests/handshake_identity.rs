@@ -681,3 +681,60 @@ fn a_replayed_first_message_yields_no_channel() {
         "{server:?}"
     );
 }
+
+#[test]
+fn accept_drops_a_silent_dialer_at_the_deadline_without_writing() {
+    // a connection that opens and sends nothing: accept ends with Timeout at its deadline, and the
+    // dialer reads nothing back
+    use std::time::{Duration, Instant};
+    let b = party(2, "bob", [2; 16]);
+    let policy_b = Policy::knowing(&[]);
+    let cred_b = b.cred;
+    let deadline = Duration::from_millis(300);
+    let (server, read) = pair(
+        move |s| {
+            let start = Instant::now();
+            let r = SecureChannel::accept_with_timeout(s, &cred_b, &policy_b, deadline);
+            (r.err(), start.elapsed())
+        },
+        |mut s| {
+            s.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
+            let mut all = Vec::new();
+            let _ = s.read_to_end(&mut all);
+            all.len()
+        },
+    );
+    let (err, took) = server;
+    assert!(matches!(err, Some(ChannelError::Timeout)), "{err:?}");
+    assert!(took < deadline * 3, "accept waited {took:?}");
+    assert_eq!(read, 0, "the responder wrote to a silent dialer");
+}
+
+#[test]
+fn the_first_message_deadline_is_total_not_per_read() {
+    // a dialer that sends its first frame one byte every 0.6 x the deadline: each read would finish in
+    // time, the whole never does
+    use std::time::{Duration, Instant};
+    let b = party(2, "bob", [2; 16]);
+    let policy_b = Policy::knowing(&[]);
+    let cred_b = b.cred;
+    let deadline = Duration::from_millis(400);
+    let (server, ()) = pair(
+        move |s| {
+            let start = Instant::now();
+            let r = SecureChannel::accept_with_timeout(s, &cred_b, &policy_b, deadline);
+            (r.err(), start.elapsed())
+        },
+        move |mut s| {
+            for b in [0u8, 96, 1, 2, 3, 4, 5] {
+                std::thread::sleep(deadline * 6 / 10);
+                if s.write_all(&[b]).is_err() {
+                    return;
+                }
+            }
+        },
+    );
+    let (err, took) = server;
+    assert!(matches!(err, Some(ChannelError::Timeout)), "{err:?}");
+    assert!(took < deadline * 2, "accept waited {took:?}");
+}

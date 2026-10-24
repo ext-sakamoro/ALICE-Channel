@@ -560,3 +560,23 @@ async fn a_device_the_responder_does_not_accept_reads_nothing_back() {
         .unwrap();
     assert!(got.is_empty(), "the raw initiator read {} bytes", got.len());
 }
+
+#[tokio::test]
+async fn accept_drops_a_silent_dialer_at_the_deadline() {
+    use tokio::io::AsyncReadExt;
+    let b = device(2, "bob");
+    let (mut sa, sb) = duplex(64 * 1024);
+    let pb = knowing(&[]);
+    let start = std::time::Instant::now();
+    let r =
+        AsyncSecureChannel::accept_with_timeout(sb, &b.cred, &pb, Duration::from_millis(300)).await;
+    assert!(matches!(r, Err(ChannelError::Timeout)), "{:?}", r.err());
+    assert!(start.elapsed() < Duration::from_millis(1_200));
+    // the responder's side is gone and nothing was written
+    let mut got = Vec::new();
+    timeout(Duration::from_secs(2), sa.read_to_end(&mut got))
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(got.is_empty());
+}
