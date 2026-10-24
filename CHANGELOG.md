@@ -1,6 +1,6 @@
 # Changelog
 
-All notable changes to ALICE-Channel are documented here. While crates.io is frozen the crate version does not change; a commit is identified by its full git revision.
+All notable changes to ALICE-Channel are documented here. A commit is identified by its full git revision.
 
 ## [Unreleased]
 
@@ -17,5 +17,5 @@ All notable changes to ALICE-Channel are documented here. While crates.io is fro
 
 ### Changed
 
-- alice-identity を path でなく git の rev (公開 repo の root) で取るようにした clone 1 つで build でき、CI は隣の checkout と deploy key を使わない
+- alice-identity を path でなく git の rev で取るようにした clone 1 つで build でき、CI は隣の checkout と deploy key を使わない
 

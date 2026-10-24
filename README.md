@@ -27,8 +27,6 @@ With the `async` feature, `AsyncSecureChannel` runs the same handshake over toki
 
 ## License
 
-License: LicenseRef-Proprietary
-
-`LicenseRef-Proprietary`: using, copying, modifying or distributing the source needs a written agreement with the copyright holder, Moroya Sakamoto. The text is [LICENSE-Proprietary](LICENSE-Proprietary).
+`LicenseRef-Proprietary`. The text is [LICENSE-Proprietary](LICENSE-Proprietary).
 
 Enquiries: https://extoria.co.jp/
