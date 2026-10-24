@@ -10,7 +10,7 @@ All notable changes to ALICE-Channel are documented here. While crates.io is fro
 - `SecureChannel::connect` / `connect_with_timeout` と `AsyncSecureChannel` の同名の関数は dial する相手の `DeviceCert` を取る その証明書は書く前に policy で検査し (`check_cert`)、応答側が示した subject が違えば `ChannelError::UnexpectedPeer` `connect_with_timeout` の期限は応答側の 2 通目を待つ時間 `SecureChannel::accept` は stream に `ReadTimeout` を求め、確認を `DEFAULT_CONFIRM_TIMEOUT` (`accept_with_timeout` で指定) まで待つ
 - `Credential::new` と handshake の検査は、証明書が名指す Noise の静的鍵と実際の静的鍵が違えば `ChannelError::StaticKeyMismatch` で拒む
 - noise 層の `HandshakeState::new` / `with_ephemeral` を `initiator` / `responder` / `initiator_with_ephemeral` / `responder_with_ephemeral` にした 読めなかった handshake の message は状態を変えない
-- alice-identity を DeviceCert version 2 の rev にした
+- alice-identity を DeviceCert version 2 (Noise の静的鍵、subject は 255 byte まで) の rev にした
 
 - handshake の最後に鍵の確認を足した: 応答側は発信側を確かめた後、新しい鍵で空の message を 1 つ送り、`connect` はそれを開けてから channel を返す 応答側が拒んだ発信側は channel を得ない (以前は 3 通目を送った時点で `connect` が終わり、拒まれたことは最初の送受信で分かった) wire が変わったので prologue を `alice-channel v2` にした (v1 の相手とは handshake で失敗する)
 - `SecureChannel::connect` は stream に `ReadTimeout` (`TcpStream` と unix の `UnixStream` に実装) を求める 確認を待つ期限は `DEFAULT_CONFIRM_TIMEOUT` (10 秒)、`connect_with_timeout` で指定でき、確認の読み全体に掛かる (1 byte ずつ送る相手でも延びない) 来なければ `ChannelError::Timeout` 確認の frame の長さは空の message の tag (16 byte) だけで、他の長さは本体を読む前に拒む stream の read timeout は待った後に元へ戻す

@@ -12,7 +12,7 @@ authors = ["Moroya Sakamoto"]
 [dependencies]
 # X25519, SHA-256 / HMAC / HKDF and ChaCha20-Poly1305 (RFC 8439), taken by git at a full commit
 alice-crypto = { version = "0.6.0", git = "https://github.com/ext-sakamoro/ALICE-Crypto", rev = "7fd119db2215c01eeeab431bd32a01f9791356c6" }
-alice-identity = { version = "1.2.0", git = "https://github.com/ext-sakamoro/ALICE-Identity", rev = "1e89ae099fed4f29a5d4e6b676370e48c0f66525" }
+alice-identity = { version = "1.2.0", git = "https://github.com/ext-sakamoro/ALICE-Identity", rev = "4932418d959456a618b4a01619ec3a25c3542aa2" }
 alice-sign = { version = "0.1", git = "https://github.com/ext-sakamoro/ALICE-Sign", rev = "8a1b00d800082187a8693732a9ffb806c98814e7" }
 zeroize = { version = "1", features = ["zeroize_derive"] }
 # the async channel (feature `async`)
