@@ -34,21 +34,18 @@ fn device(seed: u8, name: &str) -> Device {
     let master = KeyPair::from_seed([seed; 32]);
     let key = KeyPair::from_seed([seed.wrapping_add(100); 32]);
     let did = Did::parse(&format!("did:alice:{name}")).unwrap();
+    let noise = Keypair::from_secret([seed.wrapping_add(200); 32]);
     let cert = DeviceCert::issue(
         &master,
         &did,
         key.public().0,
+        noise.public(),
         1_800_000_000,
         1_800_086_400,
         [seed; 16],
     )
     .unwrap();
-    let cred = Credential::new(
-        key,
-        cert,
-        Keypair::from_secret([seed.wrapping_add(200); 32]),
-    )
-    .unwrap();
+    let cred = Credential::new(key, cert, noise).unwrap();
     Device { master, cred, did }
 }
 
@@ -85,8 +82,11 @@ async fn open(
     let (sa, sb) = duplex(cap);
     let pb = knowing(&[&a]);
     let pa = knowing(&[&b]);
+    let b_cert = b.cred.cert().clone();
     let server = tokio::spawn(async move { AsyncSecureChannel::accept(sb, &b.cred, &pb).await });
-    let client = AsyncSecureChannel::connect(sa, &a.cred, &pa).await.unwrap();
+    let client = AsyncSecureChannel::connect(sa, &a.cred, &pa, &b_cert)
+        .await
+        .unwrap();
     (client, server.await.unwrap().unwrap())
 }
 
@@ -109,14 +109,15 @@ async fn an_unknown_device_is_refused_in_the_handshake() {
     let (sa, sb) = duplex(64 * 1024);
     let nobody = knowing(&[]);
     let pa = knowing(&[&b]);
+    let b_cert = b.cred.cert().clone();
     let server =
         tokio::spawn(async move { AsyncSecureChannel::accept(sb, &b.cred, &nobody).await });
-    let client = AsyncSecureChannel::connect(sa, &a.cred, &pa).await;
+    let client = AsyncSecureChannel::connect(sa, &a.cred, &pa, &b_cert).await;
     assert!(matches!(
         server.await.unwrap(),
         Err(ChannelError::UnknownPeer)
     ));
-    // key confirmation: connect does not return a channel the responder refused
+    // the responder writes nothing to a device it refuses: connect does not return a channel
     assert!(
         matches!(client, Err(ChannelError::Closed | ChannelError::Io(_))),
         "{:?}",
@@ -260,6 +261,7 @@ async fn cancel_handshake(cancel_initiator: bool, on_read: bool) {
     let fired = Arc::new(AtomicBool::new(false));
     let signal = Arc::new(Notify::new());
     let (pa, pb) = (knowing(&[&b]), knowing(&[&a]));
+    let b_cert = b.cred.cert().clone();
     if cancel_initiator {
         let tap = Tap {
             inner: sa,
@@ -272,7 +274,7 @@ async fn cancel_handshake(cancel_initiator: bool, on_read: bool) {
         tokio::select! {
             biased;
             () = signal.notified() => {}
-            r = AsyncSecureChannel::connect(tap, &a.cred, &pa) => panic!("the handshake finished: {:?}", r.err()),
+            r = AsyncSecureChannel::connect(tap, &a.cred, &pa, &b_cert) => panic!("the handshake finished: {:?}", r.err()),
         }
         // the connecting side's stream is dropped with its future
         let r = timeout(Duration::from_secs(5), server)
@@ -288,7 +290,9 @@ async fn cancel_handshake(cancel_initiator: bool, on_read: bool) {
             signal: signal.clone(),
         };
         let client =
-            tokio::spawn(async move { AsyncSecureChannel::connect(sa, &a.cred, &pa).await });
+            tokio::spawn(
+                async move { AsyncSecureChannel::connect(sa, &a.cred, &pa, &b_cert).await },
+            );
         tokio::select! {
             biased;
             () = signal.notified() => {}
@@ -308,82 +312,75 @@ async fn a_handshake_dropped_at_any_side_and_direction_gives_the_peer_no_channel
     cancel_handshake(true, false).await; // initiator, after writing message 0
     cancel_handshake(true, true).await; // initiator, while reading message 1
     cancel_handshake(false, true).await; // responder, while reading message 0
-    cancel_handshake(false, false).await; // responder, after writing message 1
+    cancel_handshake(false, false).await; // responder, after writing message 1 (before the confirmation)
 }
 
 #[tokio::test]
-async fn connect_gives_up_on_a_responder_that_never_confirms() {
-    use alice_channel::noise::{HandshakeState, Role};
-    use alice_channel::{sign_handshake, PROLOGUE};
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+async fn connect_gives_up_on_a_responder_that_never_answers() {
+    use tokio::io::AsyncReadExt;
     let a = device(1, "alice");
     let b = device(2, "bob");
     let (sa, mut sb) = duplex(64 * 1024);
     let pa = knowing(&[&b]);
+    let b_cert = b.cred.cert().clone();
     let silent = tokio::spawn(async move {
-        let read = |len: [u8; 2]| vec![0u8; usize::from(u16::from_be_bytes(len))];
-        let mut hs = HandshakeState::new(Role::Responder, PROLOGUE, b.cred.noise_static().clone());
         let mut len = [0u8; 2];
         sb.read_exact(&mut len).await.unwrap();
-        let mut m0 = read(len);
+        let mut m0 = vec![0u8; usize::from(u16::from_be_bytes(len))];
         sb.read_exact(&mut m0).await.unwrap();
-        hs.read_message(&m0).unwrap();
-        let m1 = hs
-            .write_message_with(|h| sign_handshake(&b.cred, h).unwrap().to_bytes())
-            .unwrap();
-        sb.write_all(&u16::try_from(m1.len()).unwrap().to_be_bytes())
-            .await
-            .unwrap();
-        sb.write_all(&m1).await.unwrap();
-        sb.read_exact(&mut len).await.unwrap();
-        let mut m2 = read(len);
-        sb.read_exact(&mut m2).await.unwrap();
-        // never confirm; keep the stream open
+        // never answer; keep the stream open
         tokio::time::sleep(Duration::from_secs(2)).await;
         drop(sb);
     });
     let start = std::time::Instant::now();
-    let r = AsyncSecureChannel::connect_with_timeout(sa, &a.cred, &pa, Duration::from_millis(300))
-        .await;
+    let r = AsyncSecureChannel::connect_with_timeout(
+        sa,
+        &a.cred,
+        &pa,
+        &b_cert,
+        Duration::from_millis(300),
+    )
+    .await;
     assert!(matches!(r, Err(ChannelError::Timeout)), "{:?}", r.err());
     assert!(start.elapsed() < Duration::from_millis(1_200));
     silent.abort();
 }
 
-#[tokio::test]
-async fn a_confirmation_frame_of_another_length_is_refused_before_its_body() {
-    use alice_channel::noise::{HandshakeState, NoiseError, Role};
+/// A raw initiator `a` that completes the handshake with `b` over `sa` and then writes `confirmation` raw
+async fn raw_initiator(a: Device, rs: [u8; 32], mut sa: DuplexStream, confirmation: Vec<u8>) {
+    use alice_channel::noise::HandshakeState;
     use alice_channel::{sign_handshake, PROLOGUE};
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let mut hs = HandshakeState::initiator(PROLOGUE, a.cred.noise_static().clone(), rs);
+    let m0 = hs
+        .write_message_with(|h| sign_handshake(&a.cred, h).unwrap().to_bytes())
+        .unwrap();
+    sa.write_all(&u16::try_from(m0.len()).unwrap().to_be_bytes())
+        .await
+        .unwrap();
+    sa.write_all(&m0).await.unwrap();
+    let mut len = [0u8; 2];
+    sa.read_exact(&mut len).await.unwrap();
+    let mut m1 = vec![0u8; usize::from(u16::from_be_bytes(len))];
+    sa.read_exact(&mut m1).await.unwrap();
+    hs.read_message(&m1).unwrap();
+    sa.write_all(&confirmation).await.unwrap();
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    drop(sa);
+}
+
+#[tokio::test]
+async fn a_confirmation_frame_of_another_length_is_refused_before_its_body() {
+    use alice_channel::noise::NoiseError;
     let a = device(1, "alice");
     let b = device(2, "bob");
-    let (sa, mut sb) = duplex(64 * 1024);
-    let pa = knowing(&[&b]);
-    let liar = tokio::spawn(async move {
-        let mut hs = HandshakeState::new(Role::Responder, PROLOGUE, b.cred.noise_static().clone());
-        let mut len = [0u8; 2];
-        sb.read_exact(&mut len).await.unwrap();
-        let mut m0 = vec![0u8; usize::from(u16::from_be_bytes(len))];
-        sb.read_exact(&mut m0).await.unwrap();
-        hs.read_message(&m0).unwrap();
-        let m1 = hs
-            .write_message_with(|h| sign_handshake(&b.cred, h).unwrap().to_bytes())
-            .unwrap();
-        sb.write_all(&u16::try_from(m1.len()).unwrap().to_be_bytes())
-            .await
-            .unwrap();
-        sb.write_all(&m1).await.unwrap();
-        sb.read_exact(&mut len).await.unwrap();
-        let mut m2 = vec![0u8; usize::from(u16::from_be_bytes(len))];
-        sb.read_exact(&mut m2).await.unwrap();
-        // announce a 65 535-byte confirmation and send nothing more
-        sb.write_all(&u16::MAX.to_be_bytes()).await.unwrap();
-        tokio::time::sleep(Duration::from_secs(3)).await;
-        drop(sb);
-    });
+    let (sa, sb) = duplex(64 * 1024);
+    let pb = knowing(&[&a]);
+    let rs = b.cred.noise_static_public();
+    // announce a 65 535-byte confirmation and send nothing more
+    let liar = tokio::spawn(raw_initiator(a, rs, sa, u16::MAX.to_be_bytes().to_vec()));
     let start = std::time::Instant::now();
-    let r =
-        AsyncSecureChannel::connect_with_timeout(sa, &a.cred, &pa, Duration::from_secs(2)).await;
+    let r = AsyncSecureChannel::accept_with_timeout(sb, &b.cred, &pb, Duration::from_secs(2)).await;
     assert!(
         matches!(r, Err(ChannelError::Noise(NoiseError::Decrypt))),
         "{:?}",
@@ -391,6 +388,22 @@ async fn a_confirmation_frame_of_another_length_is_refused_before_its_body() {
     );
     assert!(start.elapsed() < Duration::from_millis(500));
     liar.abort();
+}
+
+#[tokio::test]
+async fn accept_gives_up_on_an_initiator_that_never_confirms() {
+    let a = device(1, "alice");
+    let b = device(2, "bob");
+    let (sa, sb) = duplex(64 * 1024);
+    let pb = knowing(&[&a]);
+    let rs = b.cred.noise_static_public();
+    let silent = tokio::spawn(raw_initiator(a, rs, sa, Vec::new()));
+    let start = std::time::Instant::now();
+    let r =
+        AsyncSecureChannel::accept_with_timeout(sb, &b.cred, &pb, Duration::from_millis(300)).await;
+    assert!(matches!(r, Err(ChannelError::Timeout)), "{:?}", r.err());
+    assert!(start.elapsed() < Duration::from_millis(1_200));
+    silent.abort();
 }
 
 #[tokio::test]
@@ -509,4 +522,41 @@ async fn a_poisoned_channel_is_not_split() {
             .is_err()
     );
     assert!(matches!(a.into_split(), Err(ChannelError::Poisoned)));
+}
+
+#[tokio::test]
+async fn a_device_the_responder_does_not_accept_reads_nothing_back() {
+    // a raw initiator that holds the responder's static key but is not known to the responder: accept
+    // refuses it and writes nothing, so the raw side reads the end of the stream at once
+    use alice_channel::noise::HandshakeState;
+    use alice_channel::{sign_handshake, PROLOGUE};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let a = device(1, "alice");
+    let b = device(2, "bob");
+    let mallory = device(9, "mallory");
+    let (mut sa, sb) = duplex(64 * 1024);
+    let pb = knowing(&[&a]);
+    let rs = b.cred.noise_static_public();
+    let server = tokio::spawn(async move { AsyncSecureChannel::accept(sb, &b.cred, &pb).await });
+    let mut hs = HandshakeState::initiator(PROLOGUE, mallory.cred.noise_static().clone(), rs);
+    let m0 = hs
+        .write_message_with(|h| sign_handshake(&mallory.cred, h).unwrap().to_bytes())
+        .unwrap();
+    sa.write_all(&u16::try_from(m0.len()).unwrap().to_be_bytes())
+        .await
+        .unwrap();
+    sa.write_all(&m0).await.unwrap();
+    assert!(matches!(
+        timeout(Duration::from_secs(5), server)
+            .await
+            .unwrap()
+            .unwrap(),
+        Err(ChannelError::UnknownPeer)
+    ));
+    let mut got = Vec::new();
+    timeout(Duration::from_secs(5), sa.read_to_end(&mut got))
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(got.is_empty(), "the raw initiator read {} bytes", got.len());
 }

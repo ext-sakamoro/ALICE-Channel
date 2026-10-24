@@ -1,5 +1,5 @@
-//! Oracle for the identity binding of the handshake. Each side's Noise static key is bound to its device
-//! certificate: the encrypted handshake payload is an artifact signature (`alice-identity`) by the device key
+//! Oracle for the identity binding of the handshake. Each side's Noise static key is named by its device
+//! certificate (layout version 2) and bound to the handshake: the encrypted handshake payload is an artifact signature (`alice-identity`) by the device key
 //! over SHA-256(handshake hash at that point || the sender's Noise static public key), for the context
 //! `alice-channel/handshake/v1`. The receiver checks the certificate against the subject's master key, its
 //! revocation list and the time, then the signature over its own transcript. The digest is recomputed here
@@ -10,13 +10,13 @@ use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::thread;
 
-use alice_channel::noise::{HandshakeState, Keypair, NoiseError, Role};
+use alice_channel::noise::{HandshakeState, Keypair, NoiseError};
 use alice_channel::{
     sign_handshake, ChannelError, Credential, PeerPolicy, SecureChannel, HANDSHAKE_CONTEXT,
     MAX_FRAME, PROLOGUE,
 };
 use alice_identity::artifact::{
-    sha256_payload, verify_artifact, ArtifactError, ArtifactSignature, Revocation,
+    sha256_payload, sign_artifact, verify_artifact, ArtifactError, ArtifactSignature, Revocation,
 };
 use alice_identity::cert_revocation::{CertRevocations, RevocationList};
 use alice_identity::device_cert::{DeviceCert, DeviceCertError};
@@ -37,16 +37,17 @@ fn party(seed: u8, name: &str, cert_id: [u8; 16]) -> Party {
     let master = KeyPair::from_seed([seed; 32]);
     let device = KeyPair::from_seed([seed.wrapping_add(100); 32]);
     let did = Did::parse(&format!("did:alice:{name}")).unwrap();
+    let noise_static = Keypair::from_secret([seed.wrapping_add(200); 32]);
     let cert = DeviceCert::issue(
         &master,
         &did,
         device.public().0,
+        noise_static.public(),
         ISSUED_AT,
         NOT_AFTER,
         cert_id,
     )
     .unwrap();
-    let noise_static = Keypair::from_secret([seed.wrapping_add(200); 32]);
     Party {
         master,
         did,
@@ -126,7 +127,7 @@ fn digest_for(h: [u8; 32], static_pub: [u8; 32]) -> alice_identity::artifact::Pa
 fn the_constants_are_the_documented_ones() {
     assert_eq!(HANDSHAKE_CONTEXT, b"alice-channel/handshake/v1");
     assert_eq!(MAX_FRAME, 65_535);
-    assert_eq!(PROLOGUE, b"alice-channel v2");
+    assert_eq!(PROLOGUE, b"alice-channel v3");
 }
 
 #[test]
@@ -135,6 +136,7 @@ fn two_certified_devices_connect_and_exchange_messages() {
     let b = party(2, "bob", [2; 16]);
     let policy_b = Policy::knowing(&[&a]);
     let policy_a = Policy::knowing(&[&b]);
+    let b_cert = b.cred.cert().clone();
     let cred_b = b.cred;
     let (server, client) = pair(
         move |s| {
@@ -144,7 +146,7 @@ fn two_certified_devices_connect_and_exchange_messages() {
             (got, ch.peer_cert().subject().to_string())
         },
         |s| {
-            let mut ch = SecureChannel::connect(s, &a.cred, &policy_a).unwrap();
+            let mut ch = SecureChannel::connect(s, &a.cred, &policy_a, &b_cert).unwrap();
             ch.send(b"ping").unwrap();
             (ch.recv().unwrap(), ch.peer_cert().subject().to_string())
         },
@@ -153,20 +155,36 @@ fn two_certified_devices_connect_and_exchange_messages() {
     assert_eq!(client, (b"pong".to_vec(), "did:alice:bob".to_owned()));
 }
 
+/// Run a refused handshake: bob accepts under `policy_b`, alice dials bob's certificate under `policy_a`
+fn refused(
+    a: &Party,
+    b: Party,
+    policy_a: &Policy,
+    policy_b: Policy,
+) -> (Option<ChannelError>, Option<ChannelError>) {
+    let b_cert = b.cred.cert().clone();
+    let cred_b = b.cred;
+    pair(
+        move |s| SecureChannel::accept(s, &cred_b, &policy_b).err(),
+        |s| SecureChannel::connect(s, &a.cred, policy_a, &b_cert).err(),
+    )
+}
+
 #[test]
 fn a_device_whose_master_is_unknown_is_refused_in_the_handshake() {
     let a = party(1, "alice", [1; 16]);
     let b = party(2, "bob", [2; 16]);
-    let stranger_policy = Policy::knowing(&[]); // bob knows nobody
     let policy_a = Policy::knowing(&[&b]);
-    let cred_b = b.cred;
-    let (server, _client) = pair(
-        move |s| SecureChannel::accept(s, &cred_b, &stranger_policy).err(),
-        |s| SecureChannel::connect(s, &a.cred, &policy_a).err(),
-    );
+    // bob knows nobody
+    let (server, client) = refused(&a, b, &policy_a, Policy::knowing(&[]));
     assert!(
         matches!(server, Some(ChannelError::UnknownPeer)),
         "{server:?}"
+    );
+    // bob wrote nothing back, so connect sees the connection end, not a channel
+    assert!(
+        matches!(client, Some(ChannelError::Closed | ChannelError::Io(_))),
+        "{client:?}"
     );
 }
 
@@ -183,29 +201,37 @@ fn a_revoked_device_is_refused_in_the_handshake() {
     .unwrap();
     policy_b.revocations = Some(list);
     let policy_a = Policy::knowing(&[&b]);
-    let cred_b = b.cred;
-    let (server, _client) = pair(
-        move |s| SecureChannel::accept(s, &cred_b, &policy_b).err(),
-        |s| SecureChannel::connect(s, &a.cred, &policy_a).err(),
-    );
+    let (server, _) = refused(&a, b, &policy_a, policy_b);
     assert!(
         matches!(server, Some(ChannelError::Rejected(ArtifactError::Revoked))),
         "{server:?}"
     );
 }
 
+/// Bytes a raw listener reads until the client closes, with the client's result
+fn wire_bytes<B, RB>(client: B) -> (usize, RB)
+where
+    B: FnOnce(TcpStream) -> RB,
+{
+    pair(
+        |mut s| {
+            let mut all = Vec::new();
+            let _ = s.read_to_end(&mut all);
+            all.len()
+        },
+        client,
+    )
+}
+
 #[test]
-fn an_expired_certificate_is_refused_in_the_handshake() {
+fn an_expired_certificate_is_refused_before_dialling() {
     let a = party(1, "alice", [1; 16]);
     let b = party(2, "bob", [2; 16]);
     let policy_b = Policy::knowing(&[&a]);
     let mut policy_a = Policy::knowing(&[&b]);
     policy_a.now = NOT_AFTER; // the client judges bob's certificate at its expiry
-    let cred_b = b.cred;
-    let (_server, client) = pair(
-        move |s| SecureChannel::accept(s, &cred_b, &policy_b).err(),
-        |s| SecureChannel::connect(s, &a.cred, &policy_a).err(),
-    );
+    let b_cert = b.cred.cert().clone();
+    let (server, client) = refused(&a, b, &policy_a, policy_b);
     assert!(
         matches!(
             client,
@@ -213,6 +239,96 @@ fn an_expired_certificate_is_refused_in_the_handshake() {
                 DeviceCertError::Expired { .. }
             )))
         ),
+        "{client:?}"
+    );
+    assert!(matches!(server, Some(ChannelError::Closed)), "{server:?}");
+    // nothing was written: the refusal comes before the first message
+    let (written, err) =
+        wire_bytes(|s| SecureChannel::connect(s, &a.cred, &policy_a, &b_cert).err());
+    assert_eq!(written, 0);
+    assert!(err.is_some());
+}
+
+#[test]
+fn dialling_a_certificate_the_policy_does_not_know_writes_nothing() {
+    let a = party(1, "alice", [1; 16]);
+    let b = party(2, "bob", [2; 16]);
+    let policy_b = Policy::knowing(&[&a]);
+    let b_cert = b.cred.cert().clone();
+    let nobody = Policy::knowing(&[]);
+    let (server, client) = refused(&a, b, &nobody, policy_b);
+    assert!(
+        matches!(client, Some(ChannelError::UnknownPeer)),
+        "{client:?}"
+    );
+    assert!(matches!(server, Some(ChannelError::Closed)), "{server:?}");
+    let (written, err) = wire_bytes(|s| SecureChannel::connect(s, &a.cred, &nobody, &b_cert).err());
+    assert_eq!(written, 0);
+    assert!(matches!(err, Some(ChannelError::UnknownPeer)), "{err:?}");
+}
+
+#[test]
+fn dialling_a_certificate_for_another_static_key_does_not_open() {
+    // bob's master certifies bob for a static key bob does not hold: the first message is made for that
+    // key, does not open at bob, and bob writes nothing
+    let a = party(1, "alice", [1; 16]);
+    let b = party(2, "bob", [2; 16]);
+    let not_bobs = DeviceCert::issue(
+        &b.master,
+        &b.did,
+        KeyPair::from_seed([102; 32]).public().0,
+        Keypair::from_secret([0x99; 32]).public(),
+        ISSUED_AT,
+        NOT_AFTER,
+        [7; 16],
+    )
+    .unwrap();
+    let policy_a = Policy::knowing(&[&b]);
+    let policy_b = Policy::knowing(&[&a]);
+    let cred_b = b.cred;
+    let (server, client) = pair(
+        move |s| SecureChannel::accept(s, &cred_b, &policy_b).err(),
+        |s| SecureChannel::connect(s, &a.cred, &policy_a, &not_bobs).err(),
+    );
+    assert!(
+        matches!(server, Some(ChannelError::Noise(NoiseError::Decrypt))),
+        "{server:?}"
+    );
+    assert!(
+        matches!(client, Some(ChannelError::Closed | ChannelError::Io(_))),
+        "{client:?}"
+    );
+}
+
+#[test]
+fn a_responder_proving_another_subject_than_the_one_dialled_is_refused() {
+    // bob's master also certifies bob's static key under a second subject; alice dials that one, and bob
+    // proves his own: the handshake completes cryptographically, connect refuses the subject
+    let a = party(1, "alice", [1; 16]);
+    let b = party(2, "bob", [2; 16]);
+    let alias = Did::parse("did:alice:bob-alias").unwrap();
+    let alias_cert = DeviceCert::issue(
+        &b.master,
+        &alias,
+        KeyPair::from_seed([102; 32]).public().0,
+        b.cred.noise_static_public(),
+        ISSUED_AT,
+        NOT_AFTER,
+        [8; 16],
+    )
+    .unwrap();
+    let mut policy_a = Policy::knowing(&[&b]);
+    policy_a
+        .masters
+        .insert(alias.to_string(), b.master.public());
+    let policy_b = Policy::knowing(&[&a]);
+    let cred_b = b.cred;
+    let (_, client) = pair(
+        move |s| SecureChannel::accept(s, &cred_b, &policy_b).err(),
+        |s| SecureChannel::connect(s, &a.cred, &policy_a, &alias_cert).err(),
+    );
+    assert!(
+        matches!(client, Some(ChannelError::UnexpectedPeer)),
         "{client:?}"
     );
 }
@@ -251,6 +367,46 @@ fn the_handshake_signature_covers_the_transcript_and_the_static_key() {
 }
 
 #[test]
+fn a_certificate_naming_another_static_key_than_the_handshake_used_is_refused() {
+    // mallory signs the right digest (her transcript and the static key she uses) under a certificate that
+    // names another static key: the signature verifies, the certificate does not cover the key
+    let mallory = party(3, "mallory", [3; 16]);
+    let b = party(2, "bob", [2; 16]);
+    let used = Keypair::from_secret([0x55; 32]);
+    let device = KeyPair::from_seed([103; 32]);
+    let cert = mallory.cred.cert().clone();
+    assert_ne!(cert.noise_static(), &used.public());
+    let policy_b = Policy::knowing(&[&mallory]);
+    let rs = b.cred.noise_static_public();
+    let cred_b = b.cred;
+    let (server, ()) = pair(
+        move |s| SecureChannel::accept(s, &cred_b, &policy_b).err(),
+        move |mut s| {
+            let mut hs = HandshakeState::initiator(PROLOGUE, used.clone(), rs);
+            let m0 = hs
+                .write_message_with(|h| {
+                    sign_artifact(
+                        &device,
+                        &cert,
+                        HANDSHAKE_CONTEXT,
+                        &digest_for(*h, used.public()),
+                    )
+                    .unwrap()
+                    .to_bytes()
+                })
+                .unwrap();
+            write_frame(&mut s, &m0);
+            let mut rest = Vec::new();
+            let _ = s.read_to_end(&mut rest);
+        },
+    );
+    assert!(
+        matches!(server, Some(ChannelError::StaticKeyMismatch)),
+        "{server:?}"
+    );
+}
+
+#[test]
 fn a_handshake_signature_relayed_from_another_session_is_refused() {
     // the victim connects to the attacker, who acts as an honest responder and so reads the victim's
     // signature; the attacker then presents that signature to a server in a second session
@@ -260,41 +416,30 @@ fn a_handshake_signature_relayed_from_another_session_is_refused() {
 
     // session 1: victim -> attacker (the attacker drives the Noise layer itself)
     let victim_policy = Policy::knowing(&[&attacker]);
-    let att_cred_1 = Credential::new(
-        KeyPair::from_seed([103; 32]),
-        attacker.cred.cert().clone(),
-        Keypair::from_secret([203; 32]),
-    )
-    .unwrap();
+    let att_cert = attacker.cred.cert().clone();
+    let att_cred_1 = party(3, "mallory", [3; 16]).cred;
     let (captured, _victim_side) = pair(
         move |mut s| {
-            let mut hs =
-                HandshakeState::new(Role::Responder, PROLOGUE, att_cred_1.noise_static().clone());
-            hs.read_message(&read_frame(&mut s)).unwrap();
-            // the payload is signed over the handshake hash at the point it is encrypted
-            let m1 = hs
-                .write_message_with(|h| sign_handshake(&att_cred_1, h).unwrap().to_bytes())
-                .unwrap();
-            write_frame(&mut s, &m1);
-            // the victim's payload, in clear for its peer
+            let mut hs = HandshakeState::responder(PROLOGUE, att_cred_1.noise_static().clone());
+            // the victim's payload, in clear for the responder it chose
             hs.read_message(&read_frame(&mut s)).unwrap()
         },
-        |s| SecureChannel::connect(s, &victim.cred, &victim_policy).map(|_| ()),
+        |s| SecureChannel::connect(s, &victim.cred, &victim_policy, &att_cert).map(|_| ()),
     );
     let stolen = ArtifactSignature::from_bytes(&captured).unwrap();
     assert_eq!(stolen.cert().subject().to_string(), "did:alice:victim");
 
     // session 2: attacker -> server, presenting the victim's signature
     let server_policy = Policy::knowing(&[&victim, &attacker]);
+    let rs = server.cred.noise_static_public();
     let server_cred = server.cred;
     let (server_result, ()) = pair(
         move |s| SecureChannel::accept(s, &server_cred, &server_policy).err(),
         |mut s| {
-            let mut hs =
-                HandshakeState::new(Role::Initiator, PROLOGUE, Keypair::from_secret([203; 32]));
-            write_frame(&mut s, &hs.write_message(b"").unwrap());
-            let _server_sig = hs.read_message(&read_frame(&mut s)).unwrap();
+            let mut hs = HandshakeState::initiator(PROLOGUE, Keypair::from_secret([203; 32]), rs);
             write_frame(&mut s, &hs.write_message(&stolen.to_bytes()).unwrap());
+            let mut rest = Vec::new();
+            let _ = s.read_to_end(&mut rest);
         },
     );
     assert!(
@@ -307,57 +452,45 @@ fn a_handshake_signature_relayed_from_another_session_is_refused() {
 }
 
 #[test]
-fn a_credential_needs_the_device_key_its_certificate_names() {
+fn a_credential_needs_the_device_key_and_the_static_key_its_certificate_names() {
     let a = party(1, "alice", [1; 16]);
     let wrong = KeyPair::from_seed([77; 32]);
     assert!(matches!(
-        Credential::new(wrong, a.cred.cert().clone(), Keypair::from_secret([5; 32])),
+        Credential::new(
+            wrong,
+            a.cred.cert().clone(),
+            Keypair::from_secret([201; 32])
+        ),
         Err(ChannelError::Credential(ArtifactError::KeyMismatch))
     ));
+    assert!(matches!(
+        Credential::new(
+            KeyPair::from_seed([101; 32]),
+            a.cred.cert().clone(),
+            Keypair::from_secret([5; 32])
+        ),
+        Err(ChannelError::StaticKeyMismatch)
+    ));
+    // the keys the certificate names make a credential
+    assert!(Credential::new(
+        KeyPair::from_seed([101; 32]),
+        a.cred.cert().clone(),
+        Keypair::from_secret([201; 32])
+    )
+    .is_ok());
 }
 
 #[test]
-fn connect_does_not_return_a_channel_the_responder_refused() {
-    // key confirmation: the initiator's handshake ends only when the responder, having verified the
-    // initiator, answers on the new keys; a refusal is seen by connect itself, not by the first message
-    let a = party(1, "alice", [1; 16]);
-    let b = party(2, "bob", [2; 16]);
-    let nobody = Policy::knowing(&[]);
-    let policy_a = Policy::knowing(&[&b]);
-    let cred_b = b.cred;
-    let (server, client) = pair(
-        move |s| SecureChannel::accept(s, &cred_b, &nobody).err(),
-        |s| SecureChannel::connect(s, &a.cred, &policy_a).err(),
-    );
-    assert!(
-        matches!(server, Some(ChannelError::UnknownPeer)),
-        "{server:?}"
-    );
-    assert!(
-        matches!(client, Some(ChannelError::Closed | ChannelError::Io(_))),
-        "connect returned a channel the responder refused: {client:?}"
-    );
-}
-
-#[test]
-fn connect_gives_up_on_a_responder_that_never_confirms() {
-    // a responder that reads the handshake but never answers on the new keys: connect ends with Timeout
+fn connect_gives_up_on_a_responder_that_never_answers() {
+    // a responder that reads the first message and stays silent: connect ends with Timeout
     use std::time::{Duration, Instant};
     let a = party(1, "alice", [1; 16]);
     let b = party(2, "bob", [2; 16]);
     let policy_a = Policy::knowing(&[&b]);
-    let cred_b = b.cred;
+    let b_cert = b.cred.cert().clone();
     let (_, client) = pair(
         move |mut s| {
-            let mut hs =
-                HandshakeState::new(Role::Responder, PROLOGUE, cred_b.noise_static().clone());
-            hs.read_message(&read_frame(&mut s)).unwrap();
-            let m1 = hs
-                .write_message_with(|h| sign_handshake(&cred_b, h).unwrap().to_bytes())
-                .unwrap();
-            write_frame(&mut s, &m1);
             let _ = read_frame(&mut s);
-            // stay silent, holding the connection open
             std::thread::sleep(Duration::from_millis(1_500));
         },
         |s| {
@@ -366,6 +499,7 @@ fn connect_gives_up_on_a_responder_that_never_confirms() {
                 s,
                 &a.cred,
                 &policy_a,
+                &b_cert,
                 Duration::from_millis(300),
             );
             (r.err(), start.elapsed())
@@ -388,6 +522,7 @@ fn an_operation_that_did_not_finish_poisons_the_blocking_channel() {
     let b = party(2, "bob", [2; 16]);
     let policy_b = Policy::knowing(&[&a]);
     let policy_a = Policy::knowing(&[&b]);
+    let b_cert = b.cred.cert().clone();
     let cred_b = b.cred;
     let (_, result) = pair(
         move |s| {
@@ -402,7 +537,7 @@ fn an_operation_that_did_not_finish_poisons_the_blocking_channel() {
         |s| {
             s.set_read_timeout(Some(Duration::from_millis(200)))
                 .unwrap();
-            let mut ch = SecureChannel::connect(s, &a.cred, &policy_a).unwrap();
+            let mut ch = SecureChannel::connect(s, &a.cred, &policy_a, &b_cert).unwrap();
             let first = ch.recv().err();
             (first, ch.recv().err(), ch.send(b"x").err())
         },
@@ -413,120 +548,136 @@ fn an_operation_that_did_not_finish_poisons_the_blocking_channel() {
     assert!(matches!(third, Some(ChannelError::Poisoned)), "{third:?}");
 }
 
-/// A responder that completes the handshake and then sends `confirmation` (a frame, or one built on the
-/// new keys from `payload`)
-fn confirming_responder(
-    cred: Credential,
-    payload: Option<&'static [u8]>,
-    garbage: bool,
-) -> impl FnOnce(TcpStream) + Send + 'static {
+/// What a raw initiator sends after reading the responder's message
+#[derive(Clone, Copy)]
+enum Confirm {
+    /// A message on the new keys carrying this payload
+    Payload(&'static [u8]),
+    /// 16 bytes that are not a message on the new keys
+    Garbage,
+    /// The frame of an empty message, with this length in its header, one byte every `gap`
+    Drip(Option<u16>, std::time::Duration),
+}
+
+/// A raw initiator `a` that completes the handshake with the responder `rs` and then confirms as `confirm`
+fn raw_initiator(a: Party, rs: [u8; 32], confirm: Confirm) -> impl FnOnce(TcpStream) {
     move |mut s| {
-        let mut hs = HandshakeState::new(Role::Responder, PROLOGUE, cred.noise_static().clone());
-        hs.read_message(&read_frame(&mut s)).unwrap();
-        let m1 = hs
-            .write_message_with(|h| sign_handshake(&cred, h).unwrap().to_bytes())
+        let mut hs = HandshakeState::initiator(PROLOGUE, a.cred.noise_static().clone(), rs);
+        let m0 = hs
+            .write_message_with(|h| sign_handshake(&a.cred, h).unwrap().to_bytes())
             .unwrap();
-        write_frame(&mut s, &m1);
+        write_frame(&mut s, &m0);
         hs.read_message(&read_frame(&mut s)).unwrap();
         let mut t = hs.into_transport().unwrap();
-        let frame = if garbage {
-            vec![0x5a; 16]
-        } else {
-            t.send(payload.unwrap()).unwrap()
-        };
-        write_frame(&mut s, &frame);
+        match confirm {
+            Confirm::Payload(p) => write_frame(&mut s, &t.send(p).unwrap()),
+            Confirm::Garbage => write_frame(&mut s, &[0x5a; 16]),
+            Confirm::Drip(len, gap) => {
+                let body = t.send(&[]).unwrap();
+                let mut bytes = len.unwrap_or(16).to_be_bytes().to_vec();
+                bytes.extend_from_slice(&body);
+                for b in bytes {
+                    std::thread::sleep(gap);
+                    if s.write_all(&[b]).is_err() {
+                        return;
+                    }
+                }
+            }
+        }
         std::thread::sleep(std::time::Duration::from_millis(300));
     }
 }
 
-#[test]
-fn a_confirmation_that_is_not_an_empty_message_on_the_new_keys_is_refused() {
+/// Bob accepts with `deadline` while a raw alice confirms as `confirm`; the error and the time accept took
+fn accept_against(
+    confirm: Confirm,
+    deadline: std::time::Duration,
+) -> (Option<ChannelError>, std::time::Duration) {
     let a = party(1, "alice", [1; 16]);
     let b = party(2, "bob", [2; 16]);
-    let policy_a = Policy::knowing(&[&b]);
-    for (payload, garbage) in [(Some(&b"not empty"[..]), false), (None, true)] {
-        let cred_b = Credential::new(
-            KeyPair::from_seed([102; 32]),
-            b.cred.cert().clone(),
-            Keypair::from_secret([202; 32]),
-        )
-        .unwrap();
-        let (_, client) = pair(confirming_responder(cred_b, payload, garbage), |s| {
-            SecureChannel::connect(s, &a.cred, &policy_a).err()
-        });
-        assert!(
-            matches!(client, Some(ChannelError::Noise(NoiseError::Decrypt))),
-            "garbage={garbage}: {client:?}"
-        );
-    }
+    let policy_b = Policy::knowing(&[&a]);
+    let rs = b.cred.noise_static_public();
+    let cred_b = b.cred;
+    let (server, ()) = pair(
+        move |s| {
+            let start = std::time::Instant::now();
+            let r = SecureChannel::accept_with_timeout(s, &cred_b, &policy_b, deadline);
+            (r.err(), start.elapsed())
+        },
+        raw_initiator(a, rs, confirm),
+    );
+    server
 }
 
-/// A responder that completes the handshake, then sends the confirmation frame `frame` one byte every `gap`
-fn dripping_responder(
-    cred: Credential,
-    frame_len: Option<u16>,
-    gap: std::time::Duration,
-) -> impl FnOnce(TcpStream) + Send + 'static {
-    move |mut s| {
-        let mut hs = HandshakeState::new(Role::Responder, PROLOGUE, cred.noise_static().clone());
-        hs.read_message(&read_frame(&mut s)).unwrap();
-        let m1 = hs
-            .write_message_with(|h| sign_handshake(&cred, h).unwrap().to_bytes())
-            .unwrap();
-        write_frame(&mut s, &m1);
-        hs.read_message(&read_frame(&mut s)).unwrap();
-        let mut t = hs.into_transport().unwrap();
-        let body = t.send(&[]).unwrap();
-        let mut bytes = frame_len.unwrap_or(16).to_be_bytes().to_vec();
-        bytes.extend_from_slice(&body);
-        for b in bytes {
-            std::thread::sleep(gap);
-            if s.write_all(&[b]).is_err() {
-                return;
-            }
-        }
+#[test]
+fn a_confirmation_that_is_not_an_empty_message_on_the_new_keys_is_refused() {
+    use std::time::Duration;
+    for confirm in [Confirm::Payload(b"not empty"), Confirm::Garbage] {
+        let (err, _) = accept_against(confirm, Duration::from_secs(5));
+        assert!(
+            matches!(err, Some(ChannelError::Noise(NoiseError::Decrypt))),
+            "{err:?}"
+        );
     }
+    // the reference: an empty message on the new keys opens a channel
+    let (err, _) = accept_against(Confirm::Payload(b""), Duration::from_secs(5));
+    assert!(err.is_none(), "{err:?}");
 }
 
 #[test]
 fn the_confirmation_deadline_is_total_not_per_read() {
-    use std::time::{Duration, Instant};
-    let a = party(1, "alice", [1; 16]);
-    let b = party(2, "bob", [2; 16]);
-    let policy_a = Policy::knowing(&[&b]);
+    use std::time::Duration;
     let deadline = Duration::from_millis(500);
     // 18 bytes, one every 0.6 × the deadline: each read would finish in time, the whole never does
-    let (_, (err, took)) = pair(
-        dripping_responder(b.cred, None, deadline * 6 / 10),
-        move |s| {
-            let start = Instant::now();
-            let r = SecureChannel::connect_with_timeout(s, &a.cred, &policy_a, deadline);
-            (r.err(), start.elapsed())
-        },
-    );
+    let (err, took) = accept_against(Confirm::Drip(None, deadline * 6 / 10), deadline);
     assert!(matches!(err, Some(ChannelError::Timeout)), "{err:?}");
-    assert!(took < deadline * 2, "connect waited {took:?}");
+    assert!(took < deadline * 2, "accept waited {took:?}");
 }
 
 #[test]
 fn a_confirmation_frame_of_another_length_is_refused_before_its_body() {
-    use std::time::{Duration, Instant};
-    let a = party(1, "alice", [1; 16]);
-    let b = party(2, "bob", [2; 16]);
-    let policy_a = Policy::knowing(&[&b]);
-    // the header announces 65 535 bytes; connect must refuse it at once, not wait for the body
-    let (_, (err, took)) = pair(
-        dripping_responder(b.cred, Some(u16::MAX), Duration::from_millis(1)),
-        move |s| {
-            let start = Instant::now();
-            let r =
-                SecureChannel::connect_with_timeout(s, &a.cred, &policy_a, Duration::from_secs(5));
-            (r.err(), start.elapsed())
-        },
+    use std::time::Duration;
+    // the header announces 65 535 bytes; accept must refuse it at once, not wait for the body
+    let (err, took) = accept_against(
+        Confirm::Drip(Some(u16::MAX), Duration::from_millis(1)),
+        Duration::from_secs(5),
     );
     assert!(
         matches!(err, Some(ChannelError::Noise(NoiseError::Decrypt))),
         "{err:?}"
     );
-    assert!(took < Duration::from_secs(1), "connect waited {took:?}");
+    assert!(took < Duration::from_secs(1), "accept waited {took:?}");
+}
+
+#[test]
+fn a_replayed_first_message_yields_no_channel() {
+    // an observer replays an accepted initiator's first message: the responder answers, but without the
+    // initiator's ephemeral key the observer cannot make the confirmation, and a guess does not open
+    use std::time::Duration;
+    let a = party(1, "alice", [1; 16]);
+    let b = party(2, "bob", [2; 16]);
+    let rs = b.cred.noise_static_public();
+    let mut hs = HandshakeState::initiator(PROLOGUE, a.cred.noise_static().clone(), rs);
+    let m0 = hs
+        .write_message_with(|h| sign_handshake(&a.cred, h).unwrap().to_bytes())
+        .unwrap();
+    let policy_b = Policy::knowing(&[&a]);
+    let cred_b = b.cred;
+    let (server, ()) = pair(
+        move |s| {
+            SecureChannel::accept_with_timeout(s, &cred_b, &policy_b, Duration::from_millis(300))
+                .err()
+        },
+        move |mut s| {
+            write_frame(&mut s, &m0);
+            let _ = read_frame(&mut s);
+            // a guess at the confirmation does not open on keys the observer does not have
+            write_frame(&mut s, &[0u8; 16]);
+            std::thread::sleep(Duration::from_millis(500));
+        },
+    );
+    assert!(
+        matches!(server, Some(ChannelError::Noise(NoiseError::Decrypt))),
+        "{server:?}"
+    );
 }
