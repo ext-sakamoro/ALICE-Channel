@@ -1,12 +1,16 @@
 //! The Noise protocol framework (revision 34), for the one protocol this crate speaks:
-//! `Noise_XX_25519_ChaChaPoly_SHA256`.
+//! `Noise_IK_25519_ChaChaPoly_SHA256`.
 //!
 //! ```text
-//! XX:
-//!   -> e
-//!   <- e, ee, s, es
-//!   -> s, se
+//! IK:
+//!   <- s
+//!   ...
+//!   -> e, es, s, ss
+//!   <- e, ee, se
 //! ```
+//!
+//! The initiator holds the responder's static key before it writes; the responder's static key never
+//! travels, and a first message made for another static key does not open.
 //!
 //! This layer does no I/O and knows nothing about identities: it turns payloads into handshake and transport
 //! messages and back. The primitives are ALICE-Crypto's X25519 (a Diffie-Hellman result of all zero, from a
@@ -19,7 +23,7 @@ use alice_crypto::{random, sha256, x25519};
 use zeroize::{Zeroize, Zeroizing};
 
 /// The protocol name; it is exactly 32 bytes, so it is the initial handshake hash as it stands
-pub const PROTOCOL_NAME: &[u8; 32] = b"Noise_XX_25519_ChaChaPoly_SHA256";
+pub const PROTOCOL_NAME: &[u8; 32] = b"Noise_IK_25519_ChaChaPoly_SHA256";
 
 /// The longest Noise message (handshake or transport), in bytes
 pub const MAX_MESSAGE: usize = 65_535;
@@ -125,6 +129,7 @@ fn hkdf2(ck: &[u8; 32], ikm: &[u8]) -> (Zeroizing<[u8; 32]>, Zeroizing<[u8; 32]>
 }
 
 /// One direction's key and nonce counter (section 5.1)
+#[derive(Clone)]
 struct CipherState {
     key: Option<Zeroizing<[u8; 32]>>,
     nonce: u64,
@@ -235,13 +240,13 @@ impl SymmetricState {
 /// Which side of the handshake this is
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Role {
-    /// Sends the first message
+    /// Sends the first message; knows the responder's static key beforehand
     Initiator,
     /// Receives the first message
     Responder,
 }
 
-/// The XX handshake of one side (section 5.3)
+/// The IK handshake of one side (section 5.3, pattern IK of section 7.5)
 pub struct HandshakeState {
     role: Role,
     symmetric: SymmetricState,
@@ -249,36 +254,65 @@ pub struct HandshakeState {
     e: Option<Keypair>,
     re: Option<[u8; DH_LEN]>,
     rs: Option<[u8; DH_LEN]>,
-    /// the next message of the pattern, 0 to 3 (3 = finished)
+    /// the next message of the pattern, 0 or 1 (2 = finished)
     step: u8,
     /// the ephemeral key to use, when it is fixed in advance (test vectors)
     fixed_e: Option<Keypair>,
 }
 
 impl HandshakeState {
-    /// A handshake with `s` as this side's static key and a fresh ephemeral key from the operating system
+    /// The initiator's handshake: `s` is this side's static key, `rs` the responder's static key it already
+    /// holds, and the ephemeral key comes fresh from the operating system
     #[must_use]
-    pub fn new(role: Role, prologue: &[u8], s: Keypair) -> Self {
-        Self::build(role, prologue, s, None)
+    pub fn initiator(prologue: &[u8], s: Keypair, rs: [u8; DH_LEN]) -> Self {
+        Self::build(Role::Initiator, prologue, s, Some(rs), None)
     }
 
-    /// A handshake with a fixed ephemeral key, for the published test vectors only (a reused ephemeral key
-    /// voids the protocol's guarantees)
+    /// The responder's handshake, with `s` as this side's static key
     #[must_use]
-    pub fn with_ephemeral(role: Role, prologue: &[u8], s: Keypair, e: Keypair) -> Self {
-        Self::build(role, prologue, s, Some(e))
+    pub fn responder(prologue: &[u8], s: Keypair) -> Self {
+        Self::build(Role::Responder, prologue, s, None, None)
     }
 
-    fn build(role: Role, prologue: &[u8], s: Keypair, fixed_e: Option<Keypair>) -> Self {
+    /// As [`Self::initiator`] with a fixed ephemeral key, for the published test vectors only (a reused
+    /// ephemeral key voids the protocol's guarantees)
+    #[must_use]
+    pub fn initiator_with_ephemeral(
+        prologue: &[u8],
+        s: Keypair,
+        rs: [u8; DH_LEN],
+        e: Keypair,
+    ) -> Self {
+        Self::build(Role::Initiator, prologue, s, Some(rs), Some(e))
+    }
+
+    /// As [`Self::responder`] with a fixed ephemeral key, for the published test vectors only
+    #[must_use]
+    pub fn responder_with_ephemeral(prologue: &[u8], s: Keypair, e: Keypair) -> Self {
+        Self::build(Role::Responder, prologue, s, None, Some(e))
+    }
+
+    fn build(
+        role: Role,
+        prologue: &[u8],
+        s: Keypair,
+        rs: Option<[u8; DH_LEN]>,
+        fixed_e: Option<Keypair>,
+    ) -> Self {
         let mut symmetric = SymmetricState::new();
         symmetric.mix_hash(prologue);
+        // the pre-message `<- s`: both sides hash the responder's static key
+        match role {
+            Role::Initiator => symmetric.mix_hash(rs.as_ref().expect("the initiator holds rs")),
+            Role::Responder => symmetric.mix_hash(&s.public()),
+        }
         Self {
             role,
             symmetric,
             s,
             e: None,
             re: None,
-            rs: None,
+            rs,
             step: 0,
             fixed_e,
         }
@@ -286,7 +320,7 @@ impl HandshakeState {
 
     const fn my_turn(&self) -> bool {
         match self.role {
-            Role::Initiator => self.step == 0 || self.step == 2,
+            Role::Initiator => self.step == 0,
             Role::Responder => self.step == 1,
         }
     }
@@ -296,7 +330,7 @@ impl HandshakeState {
     }
 
     const fn ephemeral(&self) -> &Keypair {
-        // set before any token that uses it (the pattern writes `e` first)
+        // set before any token that uses it (each message writes `e` first)
         self.e
             .as_ref()
             .expect("ephemeral key set by the first token")
@@ -324,33 +358,27 @@ impl HandshakeState {
             return Err(NoiseError::OutOfTurn);
         }
         let mut out = Vec::new();
-        match self.step {
-            0 => {
-                let e = self.take_ephemeral()?;
-                out.extend_from_slice(&e.public());
-                self.symmetric.mix_hash(&e.public());
-                self.e = Some(e);
-            }
-            1 => {
-                let e = self.take_ephemeral()?;
-                out.extend_from_slice(&e.public());
-                self.symmetric.mix_hash(&e.public());
-                self.e = Some(e);
-                let re = self.re.ok_or(NoiseError::OutOfTurn)?;
-                let ee = self.ephemeral().dh(&re)?;
-                self.symmetric.mix_key(ee.as_ref());
-                let s_pub = self.s.public();
-                out.extend_from_slice(&self.symmetric.encrypt_and_hash(&s_pub)?);
-                let es = self.s.dh(&re)?;
-                self.symmetric.mix_key(es.as_ref());
-            }
-            _ => {
-                let s_pub = self.s.public();
-                out.extend_from_slice(&self.symmetric.encrypt_and_hash(&s_pub)?);
-                let re = self.re.ok_or(NoiseError::OutOfTurn)?;
-                let se = self.s.dh(&re)?;
-                self.symmetric.mix_key(se.as_ref());
-            }
+        let e = self.take_ephemeral()?;
+        out.extend_from_slice(&e.public());
+        self.symmetric.mix_hash(&e.public());
+        self.e = Some(e);
+        if self.step == 0 {
+            // -> e, es, s, ss
+            let rs = self.rs.ok_or(NoiseError::OutOfTurn)?;
+            let es = self.ephemeral().dh(&rs)?;
+            self.symmetric.mix_key(es.as_ref());
+            let s_pub = self.s.public();
+            out.extend_from_slice(&self.symmetric.encrypt_and_hash(&s_pub)?);
+            let ss = self.s.dh(&rs)?;
+            self.symmetric.mix_key(ss.as_ref());
+        } else {
+            // <- e, ee, se
+            let re = self.re.ok_or(NoiseError::OutOfTurn)?;
+            let ee = self.ephemeral().dh(&re)?;
+            self.symmetric.mix_key(ee.as_ref());
+            let rs = self.rs.ok_or(NoiseError::OutOfTurn)?;
+            let se = self.ephemeral().dh(&rs)?;
+            self.symmetric.mix_key(se.as_ref());
         }
         let mut p = payload(&self.symmetric.h);
         let sealed = self.symmetric.encrypt_and_hash(&p);
@@ -375,19 +403,21 @@ impl HandshakeState {
     /// Read the next handshake message and return its payload with the handshake hash at the point the
     /// payload was encrypted (the value [`Self::write_message_with`] handed the sender)
     ///
+    /// A message that fails leaves the handshake as it was before (a responder that could not open the
+    /// first message holds no remote static key)
+    ///
     /// # Errors
     /// As [`Self::read_message`]
     pub fn read_message_with_hash(
         &mut self,
         message: &[u8],
     ) -> Result<(Vec<u8>, [u8; 32]), NoiseError> {
-        if self.my_turn() || self.step > 2 {
+        if self.my_turn() || self.step > 1 {
             return Err(NoiseError::OutOfTurn);
         }
         if message.len() > MAX_MESSAGE {
             return Err(NoiseError::TooLong);
         }
-        let mut rest = message;
         let take = |rest: &mut &[u8], n: usize| -> Result<Vec<u8>, NoiseError> {
             if rest.len() < n {
                 return Err(NoiseError::Truncated);
@@ -396,57 +426,53 @@ impl HandshakeState {
             *rest = tail;
             Ok(head.to_vec())
         };
-        match self.step {
-            0 => {
-                let re: [u8; DH_LEN] = take(&mut rest, DH_LEN)?
-                    .try_into()
-                    .map_err(|_| NoiseError::Truncated)?;
-                self.symmetric.mix_hash(&re);
-                self.re = Some(re);
-            }
-            1 => {
-                let re: [u8; DH_LEN] = take(&mut rest, DH_LEN)?
-                    .try_into()
-                    .map_err(|_| NoiseError::Truncated)?;
-                self.symmetric.mix_hash(&re);
-                self.re = Some(re);
-                let ee = self.ephemeral().dh(&re)?;
-                self.symmetric.mix_key(ee.as_ref());
-                let enc_s = take(&mut rest, DH_LEN + self.symmetric.cipher.tag_len())?;
-                let rs: [u8; DH_LEN] = self
-                    .symmetric
-                    .decrypt_and_hash(&enc_s)?
-                    .try_into()
-                    .map_err(|_| NoiseError::Decrypt)?;
-                self.rs = Some(rs);
-                let es = self.ephemeral().dh(&rs)?;
-                self.symmetric.mix_key(es.as_ref());
-            }
-            _ => {
-                let enc_s = take(&mut rest, DH_LEN + self.symmetric.cipher.tag_len())?;
-                let rs: [u8; DH_LEN] = self
-                    .symmetric
-                    .decrypt_and_hash(&enc_s)?
-                    .try_into()
-                    .map_err(|_| NoiseError::Decrypt)?;
-                self.rs = Some(rs);
-                let se = self.ephemeral().dh(&rs)?;
-                self.symmetric.mix_key(se.as_ref());
-            }
-        }
-        if rest.len() < self.symmetric.cipher.tag_len() {
+        // work on a copy of the transcript, kept only when the whole message opens
+        let mut sym = SymmetricState {
+            ck: self.symmetric.ck.clone(),
+            h: self.symmetric.h,
+            cipher: self.symmetric.cipher.clone(),
+        };
+        let mut rest = message;
+        let re: [u8; DH_LEN] = take(&mut rest, DH_LEN)?
+            .try_into()
+            .map_err(|_| NoiseError::Truncated)?;
+        sym.mix_hash(&re);
+        let rs = if self.step == 0 {
+            // -> e, es, s, ss (read by the responder)
+            let es = self.s.dh(&re)?;
+            sym.mix_key(es.as_ref());
+            let enc_s = take(&mut rest, DH_LEN + sym.cipher.tag_len())?;
+            let got: [u8; DH_LEN] = sym
+                .decrypt_and_hash(&enc_s)?
+                .try_into()
+                .map_err(|_| NoiseError::Decrypt)?;
+            let ss = self.s.dh(&got)?;
+            sym.mix_key(ss.as_ref());
+            Some(got)
+        } else {
+            // <- e, ee, se (read by the initiator)
+            let ee = self.ephemeral().dh(&re)?;
+            sym.mix_key(ee.as_ref());
+            let se = self.s.dh(&re)?;
+            sym.mix_key(se.as_ref());
+            self.rs
+        };
+        if rest.len() < sym.cipher.tag_len() {
             return Err(NoiseError::Truncated);
         }
-        let h = self.symmetric.h;
-        let payload = self.symmetric.decrypt_and_hash(rest)?;
+        let h = sym.h;
+        let payload = sym.decrypt_and_hash(rest)?;
+        self.symmetric = sym;
+        self.re = Some(re);
+        self.rs = rs;
         self.step += 1;
         Ok((payload, h))
     }
 
-    /// Whether all three messages have been written or read
+    /// Whether both messages have been written or read
     #[must_use]
     pub const fn is_finished(&self) -> bool {
-        self.step == 3
+        self.step == 2
     }
 
     /// The handshake hash: the transcript so far (after the last message, the value both sides share)
@@ -455,13 +481,14 @@ impl HandshakeState {
         self.symmetric.h
     }
 
-    /// The peer's static public key, once its message has been read
+    /// The peer's static public key: the initiator holds it from the start, the responder once it has read
+    /// the first message
     #[must_use]
     pub const fn remote_static(&self) -> Option<[u8; DH_LEN]> {
         self.rs
     }
 
-    /// The transport keys after the third message
+    /// The transport keys after the second message
     ///
     /// # Errors
     /// [`NoiseError::NotFinished`] before then

@@ -1,23 +1,32 @@
 //! Mutually authenticated, encrypted channels between certified devices
 //!
-//! Two devices run the Noise handshake `Noise_XX_25519_ChaChaPoly_SHA256` ([`noise`]). Each side's Noise
-//! static key is bound to its device certificate (`alice-identity`): the encrypted payload of its handshake
-//! message is an artifact signature by the certified device key, for the context [`HANDSHAKE_CONTEXT`], over
+//! Two devices run the Noise handshake `Noise_IK_25519_ChaChaPoly_SHA256` ([`noise`]). Each device's
+//! certificate (`alice-identity`, layout version 2) names its Noise static key under the master key's
+//! signature. The initiator dials a peer whose certificate it already holds: it checks that certificate
+//! against its [`PeerPolicy`] and takes the responder's static key from it, so the responder's static key
+//! never travels. Each side's handshake payload is an artifact signature by its certified device key, for
+//! the context [`HANDSHAKE_CONTEXT`], over
 //!
 //! ```text
 //! SHA-256(handshake hash at the point the payload is encrypted || the sender's Noise static public key)
 //! ```
 //!
-//! The receiver resolves the certificate's subject to its master key through a [`PeerPolicy`], checks the
-//! certificate (issuer, validity at the policy's time, revocation) and the signature over its own transcript,
-//! and drops the connection inside the handshake when any check fails: a device without a known master, a
-//! revoked or expired certificate, or a signature from another session or for another static key never gets
-//! a channel. The handshake ends with a key confirmation: after verifying the initiator, the responder sends
-//! one empty message on the new keys, and the initiator's `connect` returns only once it has opened it, so an
-//! initiator never holds a channel the responder refused (a confirmation that does not come within the
-//! deadline is [`ChannelError::Timeout`]). After the handshake, every message is encrypted and authenticated
-//! in order. An operation that did not finish (an I/O error, or for the async channel of the `async` feature a dropped future)
-//! leaves the channel [`ChannelError::Poisoned`]: it is never used out of step with its peer.
+//! and the certificate in it must name that static key.
+//!
+//! The responder answers only an initiator it accepts. A first message made for another static key does not
+//! open, and one from a device the policy refuses is dropped; in both cases nothing is written back, so a
+//! peer without the responder's static key and an accepted certificate learns nothing from it. The receiver
+//! resolves the certificate's subject to its master key through the [`PeerPolicy`], checks the certificate
+//! (issuer, validity at the policy's time, revocation), that it names the static key the handshake used, and
+//! the signature over its own transcript: a device without a known master, a revoked or expired certificate,
+//! or a signature from another session or for another static key never gets a channel. The responder writes
+//! its message only after verifying the initiator, so `connect` returning means the responder accepted this
+//! side. The handshake ends with a key confirmation: the initiator sends one empty message on the new keys,
+//! and the responder's `accept` returns only once it has opened it within its deadline
+//! ([`ChannelError::Timeout`] otherwise), so a replayed first message never yields a channel. After the
+//! handshake, every message is encrypted and authenticated in order. An operation that did not finish (an
+//! I/O error, or for the async channel of the `async` feature a dropped future) leaves the channel
+//! [`ChannelError::Poisoned`]: it is never used out of step with its peer.
 //!
 //! On the wire every Noise message is one frame: a big-endian `u16` length, then that many bytes.
 
@@ -41,13 +50,13 @@ use alice_identity::device_cert::DeviceCert;
 use alice_identity::did::Did;
 use alice_sign::{KeyPair, PublicKey};
 
-use noise::{HandshakeState, Keypair, NoiseError, Role, Transport};
+use noise::{HandshakeState, Keypair, NoiseError, Transport};
 
 /// The context of the handshake's artifact signatures
 pub const HANDSHAKE_CONTEXT: &[u8] = b"alice-channel/handshake/v1";
 
 /// The Noise prologue: both sides mix it in first, so a handshake of another protocol does not complete
-pub const PROLOGUE: &[u8] = b"alice-channel v2";
+pub const PROLOGUE: &[u8] = b"alice-channel v3";
 
 /// The largest frame on the wire, in bytes (the Noise message limit)
 pub const MAX_FRAME: usize = noise::MAX_MESSAGE;
@@ -55,7 +64,8 @@ pub const MAX_FRAME: usize = noise::MAX_MESSAGE;
 /// The largest payload of one [`SecureChannel::send`], in bytes
 pub const MAX_PAYLOAD: usize = MAX_FRAME - 16;
 
-/// How long `connect` waits for the responder's key confirmation unless told otherwise
+/// How long a handshake waits for the other side's next message unless told otherwise: `connect` for the
+/// responder's message, `accept` for the initiator's key confirmation
 pub const DEFAULT_CONFIRM_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Why a channel was not opened, or a message not sent or received
@@ -76,8 +86,13 @@ pub enum ChannelError {
     Credential(ArtifactError),
     /// The payload is longer than [`MAX_PAYLOAD`]
     TooLong,
-    /// The responder's key confirmation did not come within the deadline
+    /// The other side's handshake message or key confirmation did not come within the deadline
     Timeout,
+    /// A certificate names another Noise static key than the one the handshake used (or, for this side's
+    /// own credential, than its Noise static key)
+    StaticKeyMismatch,
+    /// The responder proved another subject than the certificate the initiator dialled
+    UnexpectedPeer,
     /// An earlier operation on this channel did not finish; the channel is not used again
     Poisoned,
 }
@@ -92,7 +107,11 @@ impl core::fmt::Display for ChannelError {
             Self::Rejected(e) => write!(f, "the peer was refused: {e}"),
             Self::Credential(e) => write!(f, "this side's credential cannot sign: {e}"),
             Self::TooLong => f.write_str("the channel payload is too long"),
-            Self::Timeout => f.write_str("the peer did not confirm the handshake in time"),
+            Self::Timeout => f.write_str("the peer did not continue the handshake in time"),
+            Self::StaticKeyMismatch => {
+                f.write_str("the certificate names another Noise static key")
+            }
+            Self::UnexpectedPeer => f.write_str("the responder is not the device that was dialled"),
             Self::Poisoned => f.write_str("an earlier operation on the channel did not finish"),
         }
     }
@@ -128,7 +147,8 @@ impl Credential {
     ///
     /// # Errors
     /// [`ChannelError::Credential`] when `device` is not the key `cert` names, or the certificate does not
-    /// fit an artifact signature
+    /// fit an artifact signature; [`ChannelError::StaticKeyMismatch`] when `cert` names another Noise static
+    /// key than `noise_static`
     pub fn new(
         device: KeyPair,
         cert: DeviceCert,
@@ -142,6 +162,9 @@ impl Credential {
             &PayloadDigest::sha256([0; 32]),
         )
         .map_err(ChannelError::Credential)?;
+        if *cert.noise_static() != noise_static.public() {
+            return Err(ChannelError::StaticKeyMismatch);
+        }
         Ok(Self {
             device,
             cert,
@@ -187,19 +210,38 @@ pub fn sign_handshake(cred: &Credential, h: &[u8; 32]) -> Result<ArtifactSignatu
     .map_err(ChannelError::Credential)
 }
 
-/// Check the peer's handshake payload against the transcript hash `h` and its Noise static key
+/// Check `cert` against the policy as it stands: the subject's master key is known, the certificate verifies
+/// under it at [`PeerPolicy::now`], and no revocation list the policy holds revokes it
+///
+/// # Errors
+/// [`ChannelError::UnknownPeer`], [`ChannelError::Rejected`]
+pub fn check_cert(cert: &DeviceCert, policy: &impl PeerPolicy) -> Result<(), ChannelError> {
+    let master = policy
+        .master_of(cert.subject())
+        .ok_or(ChannelError::UnknownPeer)?;
+    cert.verify(&master, policy.now())
+        .map_err(|e| ChannelError::Rejected(ArtifactError::Cert(e)))?;
+    if let Revocation::Checked(list) = policy.revocation() {
+        if list.revokes(cert) {
+            return Err(ChannelError::Rejected(ArtifactError::Revoked));
+        }
+    }
+    Ok(())
+}
+
+/// Check the peer's handshake payload against the transcript hash `h` and its Noise static key `rs`
 fn verify_peer(
     payload: &[u8],
     h: &[u8; 32],
-    remote_static: Option<[u8; 32]>,
+    rs: Option<[u8; 32]>,
     policy: &impl PeerPolicy,
 ) -> Result<DeviceCert, ChannelError> {
     let sig = ArtifactSignature::from_bytes(payload).map_err(ChannelError::Rejected)?;
     let master = policy
         .master_of(sig.cert().subject())
         .ok_or(ChannelError::UnknownPeer)?;
-    // the pattern sends the static key before the payload, so it is known here
-    let rs = remote_static.ok_or(ChannelError::Noise(NoiseError::OutOfTurn))?;
+    // the pattern carries or presupposes the static key before the payload, so it is known here
+    let rs = rs.ok_or(ChannelError::Noise(NoiseError::OutOfTurn))?;
     verify_artifact(
         &sig,
         &master,
@@ -209,7 +251,26 @@ fn verify_peer(
         policy.revocation(),
     )
     .map_err(ChannelError::Rejected)?;
+    if *sig.cert().noise_static() != rs {
+        return Err(ChannelError::StaticKeyMismatch);
+    }
     Ok(sig.cert().clone())
+}
+
+/// Before dialling: the certificate the initiator dials must pass the policy, and its static key is the
+/// responder key of the handshake
+fn dial_key(peer: &DeviceCert, policy: &impl PeerPolicy) -> Result<[u8; 32], ChannelError> {
+    check_cert(peer, policy)?;
+    Ok(*peer.noise_static())
+}
+
+/// The responder must prove the subject the initiator dialled
+fn expect_subject(got: DeviceCert, dialled: &DeviceCert) -> Result<DeviceCert, ChannelError> {
+    if got.subject() == dialled.subject() {
+        Ok(got)
+    } else {
+        Err(ChannelError::UnexpectedPeer)
+    }
 }
 
 fn io(e: &std::io::Error) -> ChannelError {
@@ -250,7 +311,7 @@ fn write_signed(hs: &mut HandshakeState, cred: &Credential) -> Result<Vec<u8>, C
     failed.map_or(Ok(msg), Err)
 }
 
-/// Open the responder's key confirmation: one empty message on the new keys
+/// Open the initiator's key confirmation: one empty message on the new keys
 fn open_confirmation(transport: &mut Transport, frame: &[u8]) -> Result<(), ChannelError> {
     if transport.recv(frame)?.is_empty() {
         Ok(())
@@ -327,21 +388,23 @@ fn read_before<S: Read + ReadTimeout>(
     Ok(())
 }
 
-/// Read the confirmation frame within `deadline` in total; a frame of another length than an empty message
-/// is refused before its body is read. The stream's own read timeout is restored afterwards
-fn read_confirmation<S: Read + ReadTimeout>(
+/// Read one frame within `deadline` in total; when `len` is given, a frame of another length is refused before
+/// its body is read. The stream's own read timeout is restored afterwards
+fn read_frame_before<S: Read + ReadTimeout>(
     stream: &mut S,
     deadline: Duration,
+    len: Option<usize>,
 ) -> Result<Vec<u8>, ChannelError> {
     let before = stream.read_timeout().map_err(|e| io(&e))?;
     let end = Instant::now() + deadline;
     let read = (|| {
-        let mut len = [0u8; 2];
-        read_before(stream, &mut len, end)?;
-        if usize::from(u16::from_be_bytes(len)) != CONFIRMATION_LEN {
+        let mut head = [0u8; 2];
+        read_before(stream, &mut head, end)?;
+        let n = usize::from(u16::from_be_bytes(head));
+        if len.is_some_and(|want| want != n) {
             return Err(ChannelError::Noise(NoiseError::Decrypt));
         }
-        let mut body = vec![0u8; CONFIRMATION_LEN];
+        let mut body = vec![0u8; n];
         read_before(stream, &mut body, end)?;
         Ok(body)
     })();
@@ -358,8 +421,8 @@ pub struct SecureChannel<S> {
 }
 
 impl<S: Read + Write + ReadTimeout> SecureChannel<S> {
-    /// Open a channel as the side that connected, waiting [`DEFAULT_CONFIRM_TIMEOUT`] for the responder's
-    /// key confirmation
+    /// Open a channel to the device `peer` certifies, as the side that connected, waiting
+    /// [`DEFAULT_CONFIRM_TIMEOUT`] for the responder's message
     ///
     /// # Errors
     /// As [`Self::connect_with_timeout`]
@@ -367,30 +430,85 @@ impl<S: Read + Write + ReadTimeout> SecureChannel<S> {
         stream: S,
         cred: &Credential,
         policy: &impl PeerPolicy,
+        peer: &DeviceCert,
     ) -> Result<Self, ChannelError> {
-        Self::connect_with_timeout(stream, cred, policy, DEFAULT_CONFIRM_TIMEOUT)
+        Self::connect_with_timeout(stream, cred, policy, peer, DEFAULT_CONFIRM_TIMEOUT)
     }
 
-    /// Open a channel as the side that connected; it is returned only after the responder, having
-    /// verified this side, confirms on the new keys within `confirm_timeout`
+    /// Open a channel to the device `peer` certifies, as the side that connected. `peer` is checked against
+    /// the policy before anything is written, and its Noise static key is the responder key of the handshake.
+    /// The channel is returned once the responder's message, which it writes only after verifying this side,
+    /// has come within `timeout` and verifies as the subject of `peer`; this side's key confirmation is sent
+    /// before returning
     ///
     /// # Errors
-    /// [`ChannelError::UnknownPeer`] / [`ChannelError::Rejected`] when the peer is refused (the stream is
-    /// dropped), [`ChannelError::Closed`] or [`ChannelError::Io`] when the responder refused this side or went
-    /// away, [`ChannelError::Timeout`] when no confirmation came, [`ChannelError::Noise`]
+    /// [`ChannelError::UnknownPeer`] / [`ChannelError::Rejected`] when `peer` or the responder's proof is
+    /// refused, [`ChannelError::StaticKeyMismatch`], [`ChannelError::UnexpectedPeer`],
+    /// [`ChannelError::Closed`] or [`ChannelError::Io`] when the responder refused this side or went away,
+    /// [`ChannelError::Timeout`] when its message did not come, [`ChannelError::Noise`]
     pub fn connect_with_timeout(
+        mut stream: S,
+        cred: &Credential,
+        policy: &impl PeerPolicy,
+        peer: &DeviceCert,
+        timeout: Duration,
+    ) -> Result<Self, ChannelError> {
+        let rs = dial_key(peer, policy)?;
+        let mut hs = HandshakeState::initiator(PROLOGUE, cred.noise_static.clone(), rs);
+        write_frame(&mut stream, &write_signed(&mut hs, cred)?)?;
+        let frame = read_frame_before(&mut stream, timeout, None)?;
+        let (payload, h) = hs.read_message_with_hash(&frame)?;
+        let got = verify_peer(&payload, &h, hs.remote_static(), policy)?;
+        let peer = expect_subject(got, peer)?;
+        let mut transport = hs.into_transport()?;
+        // key confirmation: the responder's accept returns only after this
+        write_frame(&mut stream, &transport.send(&[])?)?;
+        Ok(Self {
+            stream,
+            transport,
+            peer,
+            poisoned: false,
+        })
+    }
+
+    /// Open a channel as the side that accepted the connection, waiting [`DEFAULT_CONFIRM_TIMEOUT`] for the
+    /// initiator's key confirmation
+    ///
+    /// # Errors
+    /// As [`Self::accept_with_timeout`]
+    pub fn accept(
+        stream: S,
+        cred: &Credential,
+        policy: &impl PeerPolicy,
+    ) -> Result<Self, ChannelError> {
+        Self::accept_with_timeout(stream, cred, policy, DEFAULT_CONFIRM_TIMEOUT)
+    }
+
+    /// Open a channel as the side that accepted the connection. Nothing is written unless the first message
+    /// opens for this side's static key and the initiator verifies under the policy; the channel is returned
+    /// once the initiator's key confirmation has come within `confirm_timeout`
+    ///
+    /// A returned channel means the peer completed the handshake. It does not mean the peer is still there:
+    /// it may go away right after its confirmation, and then the first `send` or `recv` returns
+    /// [`ChannelError::Closed`] or [`ChannelError::Io`].
+    ///
+    /// # Errors
+    /// [`ChannelError::Noise`] when the first message does not open (another static key, a changed message),
+    /// [`ChannelError::UnknownPeer`] / [`ChannelError::Rejected`] / [`ChannelError::StaticKeyMismatch`] when
+    /// the initiator is refused, [`ChannelError::Timeout`] when no confirmation came,
+    /// [`ChannelError::Closed`], [`ChannelError::Io`]
+    pub fn accept_with_timeout(
         mut stream: S,
         cred: &Credential,
         policy: &impl PeerPolicy,
         confirm_timeout: Duration,
     ) -> Result<Self, ChannelError> {
-        let mut hs = HandshakeState::new(Role::Initiator, PROLOGUE, cred.noise_static.clone());
-        write_frame(&mut stream, &hs.write_message(&[])?)?;
+        let mut hs = HandshakeState::responder(PROLOGUE, cred.noise_static.clone());
         let (payload, h) = hs.read_message_with_hash(&read_frame(&mut stream)?)?;
         let peer = verify_peer(&payload, &h, hs.remote_static(), policy)?;
         write_frame(&mut stream, &write_signed(&mut hs, cred)?)?;
         let mut transport = hs.into_transport()?;
-        let frame = read_confirmation(&mut stream, confirm_timeout)?;
+        let frame = read_frame_before(&mut stream, confirm_timeout, Some(CONFIRMATION_LEN))?;
         open_confirmation(&mut transport, &frame)?;
         Ok(Self {
             stream,
@@ -402,36 +520,6 @@ impl<S: Read + Write + ReadTimeout> SecureChannel<S> {
 }
 
 impl<S: Read + Write> SecureChannel<S> {
-    /// Open a channel as the side that accepted the connection, after sending the key confirmation
-    ///
-    /// A returned channel means the peer completed the handshake. It does not mean the peer is still there:
-    /// the peer may have gone away right after its last handshake message (nothing can tell the side that
-    /// sends the last message whether it arrived), and then the first `send` or `recv` returns
-    /// [`ChannelError::Closed`] or [`ChannelError::Io`].
-    ///
-    /// # Errors
-    /// As [`Self::connect`], except [`ChannelError::Timeout`]
-    pub fn accept(
-        mut stream: S,
-        cred: &Credential,
-        policy: &impl PeerPolicy,
-    ) -> Result<Self, ChannelError> {
-        let mut hs = HandshakeState::new(Role::Responder, PROLOGUE, cred.noise_static.clone());
-        hs.read_message(&read_frame(&mut stream)?)?;
-        write_frame(&mut stream, &write_signed(&mut hs, cred)?)?;
-        let (payload, h) = hs.read_message_with_hash(&read_frame(&mut stream)?)?;
-        let peer = verify_peer(&payload, &h, hs.remote_static(), policy)?;
-        let mut transport = hs.into_transport()?;
-        // key confirmation: the initiator's connect returns only after this
-        write_frame(&mut stream, &transport.send(&[])?)?;
-        Ok(Self {
-            stream,
-            transport,
-            peer,
-            poisoned: false,
-        })
-    }
-
     /// Send one message
     ///
     /// # Errors

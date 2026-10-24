@@ -15,10 +15,10 @@ use std::time::Duration;
 use alice_identity::device_cert::DeviceCert;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadHalf, WriteHalf};
 
-use crate::noise::{HandshakeState, Role, Transport, TransportReceiver, TransportSender};
+use crate::noise::{HandshakeState, Transport, TransportReceiver, TransportSender};
 use crate::{
-    open_confirmation, verify_peer, write_signed, ChannelError, Credential, PeerPolicy,
-    CONFIRMATION_LEN, DEFAULT_CONFIRM_TIMEOUT, MAX_PAYLOAD, PROLOGUE,
+    dial_key, expect_subject, open_confirmation, verify_peer, write_signed, ChannelError,
+    Credential, PeerPolicy, CONFIRMATION_LEN, DEFAULT_CONFIRM_TIMEOUT, MAX_PAYLOAD, PROLOGUE,
 };
 
 fn io(e: &std::io::Error) -> ChannelError {
@@ -79,8 +79,8 @@ pub struct AsyncSecureChannel<S> {
 }
 
 impl<S: AsyncRead + AsyncWrite + Unpin + Send> AsyncSecureChannel<S> {
-    /// Open a channel as the side that connected, waiting [`DEFAULT_CONFIRM_TIMEOUT`] for the responder's
-    /// key confirmation
+    /// Open a channel to the device `peer` certifies, as the side that connected, waiting
+    /// [`DEFAULT_CONFIRM_TIMEOUT`] for the responder's message
     ///
     /// # Errors
     /// As [`Self::connect_with_timeout`]
@@ -88,12 +88,13 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send> AsyncSecureChannel<S> {
         stream: S,
         cred: &Credential,
         policy: &(impl PeerPolicy + Sync),
+        peer: &DeviceCert,
     ) -> Result<Self, ChannelError> {
-        Self::connect_with_timeout(stream, cred, policy, DEFAULT_CONFIRM_TIMEOUT).await
+        Self::connect_with_timeout(stream, cred, policy, peer, DEFAULT_CONFIRM_TIMEOUT).await
     }
 
-    /// Open a channel as the side that connected; it is returned only after the responder, having
-    /// verified this side, confirms on the new keys within `confirm_timeout`
+    /// Open a channel to the device `peer` certifies, as the side that connected; see
+    /// [`crate::SecureChannel::connect_with_timeout`]
     ///
     /// # Errors
     /// As [`crate::SecureChannel::connect_with_timeout`]
@@ -101,18 +102,20 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send> AsyncSecureChannel<S> {
         mut stream: S,
         cred: &Credential,
         policy: &(impl PeerPolicy + Sync),
-        confirm_timeout: Duration,
+        peer: &DeviceCert,
+        timeout: Duration,
     ) -> Result<Self, ChannelError> {
-        let mut hs = HandshakeState::new(Role::Initiator, PROLOGUE, cred.noise_static().clone());
-        write_frame(&mut stream, &hs.write_message(&[])?).await?;
-        let (payload, h) = hs.read_message_with_hash(&read_frame(&mut stream).await?)?;
-        let peer = verify_peer(&payload, &h, hs.remote_static(), policy)?;
+        let rs = dial_key(peer, policy)?;
+        let mut hs = HandshakeState::initiator(PROLOGUE, cred.noise_static().clone(), rs);
         write_frame(&mut stream, &write_signed(&mut hs, cred)?).await?;
-        let mut transport = hs.into_transport()?;
-        let frame = tokio::time::timeout(confirm_timeout, read_confirmation(&mut stream))
+        let frame = tokio::time::timeout(timeout, read_frame(&mut stream))
             .await
             .map_err(|_| ChannelError::Timeout)??;
-        open_confirmation(&mut transport, &frame)?;
+        let (payload, h) = hs.read_message_with_hash(&frame)?;
+        let got = verify_peer(&payload, &h, hs.remote_static(), policy)?;
+        let peer = expect_subject(got, peer)?;
+        let mut transport = hs.into_transport()?;
+        write_frame(&mut stream, &transport.send(&[])?).await?;
         Ok(Self {
             stream,
             transport,
@@ -121,25 +124,39 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send> AsyncSecureChannel<S> {
         })
     }
 
-    /// Open a channel as the side that accepted the connection, after sending the key confirmation
-    ///
-    /// A returned channel means the peer completed the handshake, not that it is still there; see
-    /// [`crate::SecureChannel::accept`].
+    /// Open a channel as the side that accepted the connection, waiting [`DEFAULT_CONFIRM_TIMEOUT`] for the
+    /// initiator's key confirmation
     ///
     /// # Errors
-    /// As [`crate::SecureChannel::accept`]
+    /// As [`Self::accept_with_timeout`]
     pub async fn accept(
-        mut stream: S,
+        stream: S,
         cred: &Credential,
         policy: &(impl PeerPolicy + Sync),
     ) -> Result<Self, ChannelError> {
-        let mut hs = HandshakeState::new(Role::Responder, PROLOGUE, cred.noise_static().clone());
-        hs.read_message(&read_frame(&mut stream).await?)?;
-        write_frame(&mut stream, &write_signed(&mut hs, cred)?).await?;
+        Self::accept_with_timeout(stream, cred, policy, DEFAULT_CONFIRM_TIMEOUT).await
+    }
+
+    /// Open a channel as the side that accepted the connection; see
+    /// [`crate::SecureChannel::accept_with_timeout`]
+    ///
+    /// # Errors
+    /// As [`crate::SecureChannel::accept_with_timeout`]
+    pub async fn accept_with_timeout(
+        mut stream: S,
+        cred: &Credential,
+        policy: &(impl PeerPolicy + Sync),
+        confirm_timeout: Duration,
+    ) -> Result<Self, ChannelError> {
+        let mut hs = HandshakeState::responder(PROLOGUE, cred.noise_static().clone());
         let (payload, h) = hs.read_message_with_hash(&read_frame(&mut stream).await?)?;
         let peer = verify_peer(&payload, &h, hs.remote_static(), policy)?;
+        write_frame(&mut stream, &write_signed(&mut hs, cred)?).await?;
         let mut transport = hs.into_transport()?;
-        write_frame(&mut stream, &transport.send(&[])?).await?;
+        let frame = tokio::time::timeout(confirm_timeout, read_confirmation(&mut stream))
+            .await
+            .map_err(|_| ChannelError::Timeout)??;
+        open_confirmation(&mut transport, &frame)?;
         Ok(Self {
             stream,
             transport,
