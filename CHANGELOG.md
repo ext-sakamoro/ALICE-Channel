@@ -6,6 +6,7 @@ All notable changes to ALICE-Channel are documented here. While crates.io is fro
 
 ### 破壊的変更
 
+- `SecureChannel::accept_with_timeout` / `AsyncSecureChannel::accept_with_timeout` の期限は発信側の 1 通目にも掛かる (何も送らない接続は期限で何も書かずに切る、1 byte ずつ送る相手でも延びない) 引数は `confirm_timeout` から `timeout` にした `accept` は `DEFAULT_CONFIRM_TIMEOUT` を両方に使う
 - handshake を `Noise_IK_25519_ChaChaPoly_SHA256` にした (XX をやめた): 発信側は相手の証明書 (ALICE-Identity の layout version 2、Noise の静的鍵を master が署名する) を持って dial し、そこから応答側の静的鍵を取る 応答側の静的鍵は wire に出ない 応答側は 1 通目が自分の静的鍵で開かない時、または発信側を policy が拒む時に何も書かずに切る 応答側は発信側を確かめてから 2 通目を書き、発信側は新しい鍵で空の message を 1 つ送って確認し、`accept` はそれを開けてから channel を返す prologue は `alice-channel v3`
 - `SecureChannel::connect` / `connect_with_timeout` と `AsyncSecureChannel` の同名の関数は dial する相手の `DeviceCert` を取る その証明書は書く前に policy で検査し (`check_cert`)、応答側が示した subject が違えば `ChannelError::UnexpectedPeer` `connect_with_timeout` の期限は応答側の 2 通目を待つ時間 `SecureChannel::accept` は stream に `ReadTimeout` を求め、確認を `DEFAULT_CONFIRM_TIMEOUT` (`accept_with_timeout` で指定) まで待つ
 - `Credential::new` と handshake の検査は、証明書が名指す Noise の静的鍵と実際の静的鍵が違えば `ChannelError::StaticKeyMismatch` で拒む

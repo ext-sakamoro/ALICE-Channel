@@ -125,7 +125,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send> AsyncSecureChannel<S> {
     }
 
     /// Open a channel as the side that accepted the connection, waiting [`DEFAULT_CONFIRM_TIMEOUT`] for the
-    /// initiator's key confirmation
+    /// initiator's first message and then for its key confirmation
     ///
     /// # Errors
     /// As [`Self::accept_with_timeout`]
@@ -146,14 +146,17 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send> AsyncSecureChannel<S> {
         mut stream: S,
         cred: &Credential,
         policy: &(impl PeerPolicy + Sync),
-        confirm_timeout: Duration,
+        timeout: Duration,
     ) -> Result<Self, ChannelError> {
         let mut hs = HandshakeState::responder(PROLOGUE, cred.noise_static().clone());
-        let (payload, h) = hs.read_message_with_hash(&read_frame(&mut stream).await?)?;
+        let first = tokio::time::timeout(timeout, read_frame(&mut stream))
+            .await
+            .map_err(|_| ChannelError::Timeout)??;
+        let (payload, h) = hs.read_message_with_hash(&first)?;
         let peer = verify_peer(&payload, &h, hs.remote_static(), policy)?;
         write_frame(&mut stream, &write_signed(&mut hs, cred)?).await?;
         let mut transport = hs.into_transport()?;
-        let frame = tokio::time::timeout(confirm_timeout, read_confirmation(&mut stream))
+        let frame = tokio::time::timeout(timeout, read_confirmation(&mut stream))
             .await
             .map_err(|_| ChannelError::Timeout)??;
         open_confirmation(&mut transport, &frame)?;

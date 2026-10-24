@@ -65,7 +65,7 @@ pub const MAX_FRAME: usize = noise::MAX_MESSAGE;
 pub const MAX_PAYLOAD: usize = MAX_FRAME - 16;
 
 /// How long a handshake waits for the other side's next message unless told otherwise: `connect` for the
-/// responder's message, `accept` for the initiator's key confirmation
+/// responder's message, `accept` for the initiator's first message and then for its key confirmation
 pub const DEFAULT_CONFIRM_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Why a channel was not opened, or a message not sent or received
@@ -472,7 +472,7 @@ impl<S: Read + Write + ReadTimeout> SecureChannel<S> {
     }
 
     /// Open a channel as the side that accepted the connection, waiting [`DEFAULT_CONFIRM_TIMEOUT`] for the
-    /// initiator's key confirmation
+    /// initiator's first message and then for its key confirmation
     ///
     /// # Errors
     /// As [`Self::accept_with_timeout`]
@@ -485,8 +485,10 @@ impl<S: Read + Write + ReadTimeout> SecureChannel<S> {
     }
 
     /// Open a channel as the side that accepted the connection. Nothing is written unless the first message
-    /// opens for this side's static key and the initiator verifies under the policy; the channel is returned
-    /// once the initiator's key confirmation has come within `confirm_timeout`
+    /// opens for this side's static key and the initiator verifies under the policy. The first message must
+    /// come within `timeout` (a silent connection is dropped then, with nothing written), and the channel is
+    /// returned once the initiator's key confirmation has come within `timeout` after this side's message;
+    /// each deadline holds for the whole message, however slowly its bytes come
     ///
     /// A returned channel means the peer completed the handshake. It does not mean the peer is still there:
     /// it may go away right after its confirmation, and then the first `send` or `recv` returns
@@ -495,20 +497,22 @@ impl<S: Read + Write + ReadTimeout> SecureChannel<S> {
     /// # Errors
     /// [`ChannelError::Noise`] when the first message does not open (another static key, a changed message),
     /// [`ChannelError::UnknownPeer`] / [`ChannelError::Rejected`] / [`ChannelError::StaticKeyMismatch`] when
-    /// the initiator is refused, [`ChannelError::Timeout`] when no confirmation came,
+    /// the initiator is refused, [`ChannelError::Timeout`] when the first message or the confirmation did not
+    /// come,
     /// [`ChannelError::Closed`], [`ChannelError::Io`]
     pub fn accept_with_timeout(
         mut stream: S,
         cred: &Credential,
         policy: &impl PeerPolicy,
-        confirm_timeout: Duration,
+        timeout: Duration,
     ) -> Result<Self, ChannelError> {
         let mut hs = HandshakeState::responder(PROLOGUE, cred.noise_static.clone());
-        let (payload, h) = hs.read_message_with_hash(&read_frame(&mut stream)?)?;
+        let first = read_frame_before(&mut stream, timeout, None)?;
+        let (payload, h) = hs.read_message_with_hash(&first)?;
         let peer = verify_peer(&payload, &h, hs.remote_static(), policy)?;
         write_frame(&mut stream, &write_signed(&mut hs, cred)?)?;
         let mut transport = hs.into_transport()?;
-        let frame = read_frame_before(&mut stream, confirm_timeout, Some(CONFIRMATION_LEN))?;
+        let frame = read_frame_before(&mut stream, timeout, Some(CONFIRMATION_LEN))?;
         open_confirmation(&mut transport, &frame)?;
         Ok(Self {
             stream,
