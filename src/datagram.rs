@@ -13,7 +13,9 @@
 //! ```
 //!
 //! The handshake is the stream channel's Noise IK with the same signed payloads, so the same certificates
-//! and policy decide who gets a channel. Packets may be lost, so the initiator repeats its init packet
+//! and policy decide who gets a channel. The initiator's encrypted payload also carries a timestamp
+//! ([`InitTimestamp`], TAI64N): a [`Responder`] answers an init only when its timestamp is later than the
+//! last one it accepted from the same static key, so an old init replayed later starts nothing. Packets may be lost, so the initiator repeats its init packet
 //! ([`Initiator::first`]) until it has the response, and the responder answers a repeated init with the
 //! response it already wrote ([`Pending::is_first`], [`Pending::response`]) rather than starting a second
 //! handshake. The responder's channel is returned by the first data packet that opens under the new keys
@@ -27,12 +29,14 @@
 //! one below the window is [`DatagramError::TooOld`]. A counter is recorded only after its packet opened,
 //! so a changed or forged packet moves nothing.
 
+use std::collections::BTreeMap;
+
 use alice_identity::device_cert::DeviceCert;
 
-use crate::noise::{DatagramTransport, HandshakeState, NoiseError};
+use crate::noise::{DatagramTransport, HandshakeState, Keypair, NoiseError};
 use crate::{
-    dial_key, expect_subject, verify_peer, write_signed, ChannelError, Credential, PeerPolicy,
-    PROLOGUE,
+    dial_key, expect_subject, sign_handshake, verify_peer, write_signed, ChannelError, Credential,
+    PeerPolicy, PROLOGUE,
 };
 
 /// The kind of an initiator's handshake packet
@@ -57,6 +61,35 @@ pub const MAX_DATAGRAM_PAYLOAD: usize = 65_507 - DATA_HEADER_LEN - TAG_LEN;
 
 const TAG_LEN: usize = alice_crypto::chacha20poly1305_ietf::TAG_SIZE;
 const WORDS: usize = (REPLAY_WINDOW / 64) as usize;
+
+/// The time an init was made, as TAI64N: 8 bytes big-endian of 2^62 + the seconds since 1970, then 4 bytes
+/// big-endian of the nanoseconds, so a later time is greater byte by byte
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct InitTimestamp(pub [u8; 12]);
+
+impl InitTimestamp {
+    /// The bytes it takes at the head of the initiator's payload
+    pub const LEN: usize = 12;
+
+    /// The label of `secs` seconds and `nanos` nanoseconds after 1970 (nanoseconds above 999,999,999 are
+    /// taken as 999,999,999)
+    #[must_use]
+    pub fn from_unix(secs: u64, nanos: u32) -> Self {
+        let mut b = [0u8; 12];
+        b[..8].copy_from_slice(&((1u64 << 62) + secs).to_be_bytes());
+        b[8..].copy_from_slice(&nanos.min(999_999_999).to_be_bytes());
+        Self(b)
+    }
+
+    /// The label of the system clock now (before 1970 counts as 1970)
+    #[must_use]
+    pub fn now() -> Self {
+        let d = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default();
+        Self::from_unix(d.as_secs(), d.subsec_nanos())
+    }
+}
 
 /// Why a data packet was not sealed or opened
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -168,10 +201,67 @@ impl Initiator {
         policy: &impl PeerPolicy,
         peer: &DeviceCert,
     ) -> Result<(Self, Vec<u8>), ChannelError> {
+        Self::start_at(cred, policy, peer, InitTimestamp::now())
+    }
+
+    /// As [`Self::start`], with the init's timestamp given (it must be later than any earlier init of
+    /// this static key to the same responder)
+    ///
+    /// # Errors
+    /// As [`Self::start`]
+    pub fn start_at(
+        cred: &Credential,
+        policy: &impl PeerPolicy,
+        peer: &DeviceCert,
+        at: InitTimestamp,
+    ) -> Result<(Self, Vec<u8>), ChannelError> {
         let rs = dial_key(peer, policy)?;
-        let mut hs = HandshakeState::initiator(PROLOGUE, cred.noise_static.clone(), rs);
+        let hs = HandshakeState::initiator(PROLOGUE, cred.noise_static.clone(), rs);
+        Self::begin(hs, cred, peer, at)
+    }
+
+    /// As [`Self::start_at`] with a fixed ephemeral key, for test vectors only (a reused ephemeral key
+    /// voids the protocol's guarantees)
+    ///
+    /// # Errors
+    /// As [`Self::start`]
+    pub fn start_with_ephemeral(
+        cred: &Credential,
+        policy: &impl PeerPolicy,
+        peer: &DeviceCert,
+        at: InitTimestamp,
+        ephemeral: Keypair,
+    ) -> Result<(Self, Vec<u8>), ChannelError> {
+        let rs = dial_key(peer, policy)?;
+        let hs = HandshakeState::initiator_with_ephemeral(
+            PROLOGUE,
+            cred.noise_static.clone(),
+            rs,
+            ephemeral,
+        );
+        Self::begin(hs, cred, peer, at)
+    }
+
+    fn begin(
+        mut hs: HandshakeState,
+        cred: &Credential,
+        peer: &DeviceCert,
+        at: InitTimestamp,
+    ) -> Result<(Self, Vec<u8>), ChannelError> {
+        let mut failed = None;
+        let msg = hs.write_message_with(|h| {
+            let mut payload = at.0.to_vec();
+            match sign_handshake(cred, h) {
+                Ok(sig) => payload.extend_from_slice(&sig.to_bytes()),
+                Err(e) => failed = Some(e),
+            }
+            payload
+        })?;
+        if let Some(e) = failed {
+            return Err(e);
+        }
         let mut first = vec![KIND_INIT];
-        first.extend_from_slice(&write_signed(&mut hs, cred)?);
+        first.extend_from_slice(&msg);
         Ok((
             Self {
                 hs,
@@ -217,18 +307,61 @@ impl Initiator {
     }
 }
 
-/// The responder's side of a datagram handshake
-pub struct Responder;
+/// The responder's side of datagram handshakes: it remembers the latest init timestamp it accepted from
+/// each initiator's static key
+#[derive(Debug, Default)]
+pub struct Responder {
+    last: BTreeMap<[u8; 32], InitTimestamp>,
+}
 
 impl Responder {
+    /// A responder that has accepted no init yet
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
     /// Answer an init packet: nothing is returned (so nothing is sent) unless it opens for this side's
-    /// static key and the initiator verifies under the policy
+    /// static key, the initiator verifies under the policy, and its timestamp is later than the last one
+    /// accepted from that static key. A repeat of an init already answered is refused as stale: check
+    /// [`Pending::is_first`] first and send [`Pending::response`] again
     ///
     /// # Errors
     /// [`ChannelError::Noise`] when the packet does not open (another static key, a changed packet),
     /// [`ChannelError::UnknownPeer`] / [`ChannelError::Rejected`] / [`ChannelError::StaticKeyMismatch`]
-    /// when the initiator is refused, [`ChannelError::Credential`]
+    /// when the initiator is refused, [`ChannelError::StaleInit`], [`ChannelError::Credential`]
     pub fn respond(
+        &mut self,
+        cred: &Credential,
+        policy: &impl PeerPolicy,
+        packet: &[u8],
+    ) -> Result<Pending, ChannelError> {
+        let hs = HandshakeState::responder(PROLOGUE, cred.noise_static.clone());
+        self.answer(hs, cred, policy, packet)
+    }
+
+    /// As [`Self::respond`] with a fixed ephemeral key, for test vectors only
+    ///
+    /// # Errors
+    /// As [`Self::respond`]
+    pub fn respond_with_ephemeral(
+        &mut self,
+        cred: &Credential,
+        policy: &impl PeerPolicy,
+        packet: &[u8],
+        ephemeral: Keypair,
+    ) -> Result<Pending, ChannelError> {
+        let hs = HandshakeState::responder_with_ephemeral(
+            PROLOGUE,
+            cred.noise_static.clone(),
+            ephemeral,
+        );
+        self.answer(hs, cred, policy, packet)
+    }
+
+    fn answer(
+        &mut self,
+        mut hs: HandshakeState,
         cred: &Credential,
         policy: &impl PeerPolicy,
         packet: &[u8],
@@ -236,11 +369,24 @@ impl Responder {
         let body = packet
             .strip_prefix(&[KIND_INIT])
             .ok_or(ChannelError::Noise(NoiseError::Truncated))?;
-        let mut hs = HandshakeState::responder(PROLOGUE, cred.noise_static.clone());
         let (payload, h) = hs.read_message_with_hash(body)?;
-        let peer = verify_peer(&payload, &h, hs.remote_static(), policy)?;
+        if payload.len() < InitTimestamp::LEN {
+            return Err(ChannelError::Noise(NoiseError::Truncated));
+        }
+        let (stamp, signed) = payload.split_at(InitTimestamp::LEN);
+        let mut at = [0u8; InitTimestamp::LEN];
+        at.copy_from_slice(stamp);
+        let at = InitTimestamp(at);
+        let peer = verify_peer(signed, &h, hs.remote_static(), policy)?;
+        let rs = hs
+            .remote_static()
+            .ok_or(ChannelError::Noise(NoiseError::OutOfTurn))?;
+        if self.last.get(&rs).is_some_and(|last| at <= *last) {
+            return Err(ChannelError::StaleInit);
+        }
         let mut response = vec![KIND_RESPONSE];
         response.extend_from_slice(&write_signed(&mut hs, cred)?);
+        self.last.insert(rs, at);
         Ok(Pending {
             first: packet.to_vec(),
             response,

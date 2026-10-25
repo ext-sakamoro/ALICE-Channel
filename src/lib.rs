@@ -96,6 +96,9 @@ pub enum ChannelError {
     UnexpectedPeer,
     /// An earlier operation on this channel did not finish; the channel is not used again
     Poisoned,
+    /// A datagram init whose timestamp is not later than the last one accepted from its static key (a
+    /// replayed or repeated init)
+    StaleInit,
 }
 
 impl core::fmt::Display for ChannelError {
@@ -114,6 +117,7 @@ impl core::fmt::Display for ChannelError {
             }
             Self::UnexpectedPeer => f.write_str("the responder is not the device that was dialled"),
             Self::Poisoned => f.write_str("an earlier operation on the channel did not finish"),
+            Self::StaleInit => f.write_str("the init is not later than the last one accepted"),
         }
     }
 }
