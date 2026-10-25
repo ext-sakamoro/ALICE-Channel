@@ -198,6 +198,10 @@ jobs:
           PY=$(command -v python3 || command -v python)
           "$PY" scripts/test_shared_files.py
           scripts/shared_files.sh
+      # ALICE-Law G11: conformance/g11.toml is the table ALICE-Law's generator gives for the
+      # declared gates (checker fetched at .github/g11-table-pin, SHA-256 pinned)
+      - name: G11 table matches the declared gates
+        run: scripts/g11_table.sh
       - name: Effective rustc flags (default and feature async)
         if: runner.os != 'Windows'
         run: |

@@ -310,6 +310,9 @@ step "ci.yml / float-environment: Shared files equal ALICE-Law's table"
 python3 scripts/test_shared_files.py
 scripts/shared_files.sh
 
+step "ci.yml / float-environment: G11 table matches the declared gates"
+scripts/g11_table.sh
+
 step "ci.yml / float-environment: No negated fma result (syntax tree, tests then check)"
 cargo fmt --manifest-path tools/no-outer-fneg-of-fma/Cargo.toml -- --check
 cargo test --quiet --locked --manifest-path tools/no-outer-fneg-of-fma/Cargo.toml

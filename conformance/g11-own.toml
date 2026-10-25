@@ -1,0 +1,30 @@
+# ALICE-Law G11: this repository's own rows of conformance/g11.toml (the rows of the checkers the ALICE
+# crates share are generated from ALICE-Law). ALICE-Law's scripts/g11_table_gen.py writes conformance/g11.toml
+# from both (python3 scripts/g11_table_gen.py --repo <this repository> --name ALICE-Channel --write, run in
+# an ALICE-Law checkout).
+#
+# The golden and identifier suites are run by scripts/run_tests.sh, which fails a step when a named test
+# binary ran no test; its zero test is therefore the compared-nothing test of each leg, and each canary
+# is a test of a binary the leg names. The test job runs the debug (G4) and release (G5) legs from one
+# step, its profile taken from the matrix.
+
+[[row]]
+gate = "G4"
+checker = ".github/workflows/ci.yml#- name: Law tests (semantics goldens and identifier, Noise vectors)>scripts/run_tests.sh"
+canary = "tests/semantics_golden.rs::checker_rejects_a_wrong_digest"
+zero = "scripts/test_run_tests.py::RunTests.test_a_named_file_that_ran_zero_fails"
+shared = ["scripts/run_tests.sh", "scripts/test_run_tests.py"]
+
+[[row]]
+gate = "G5"
+checker = ".github/workflows/ci.yml#- name: Law tests (semantics goldens and identifier, Noise vectors)>scripts/run_tests.sh"
+canary = "tests/semantics_golden.rs::checker_rejects_a_wrong_digest"
+zero = "scripts/test_run_tests.py::RunTests.test_a_named_file_that_ran_zero_fails"
+shared = ["scripts/run_tests.sh", "scripts/test_run_tests.py"]
+
+[[row]]
+gate = "G6"
+checker = ".github/workflows/ci.yml#- name: Law tests (semantics goldens and identifier, Noise vectors)>scripts/run_tests.sh"
+canary = "tests/channel_semantics_id.rs::one_changed_bit_in_any_entry_changes_the_identifier"
+zero = "scripts/test_run_tests.py::RunTests.test_a_named_file_that_ran_zero_fails"
+shared = ["scripts/run_tests.sh", "scripts/test_run_tests.py"]
