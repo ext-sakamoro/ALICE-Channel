@@ -255,6 +255,10 @@ has_toolchain 1.88 || { echo "missing toolchain 1.88 (rustup toolchain install 1
 step "ci.yml / fmt: Check formatting"
 ( export CARGO_TERM_COLOR="always"; cargo fmt -- --check )
 
+step "ci.yml / fmt: No generated file is tracked (tests and check)"
+python3 scripts/test_tracked_generated_check.py
+python3 scripts/tracked_generated_check.py
+
 step "ci.yml / clippy: Clippy"
 relint
 ( export CARGO_TERM_COLOR="always"; cargo clippy --locked --all-targets -- -D warnings )
@@ -262,6 +266,25 @@ relint
 step "ci.yml / clippy: Clippy (feature async)"
 relint
 ( export CARGO_TERM_COLOR="always"; cargo clippy --locked --all-targets --features async -- -D warnings )
+
+step "ci.yml / clippy: Law boundary scan (tests, then the library's rustdoc JSON)"
+python3 scripts/test_law_boundary_scan.py
+( export RUSTC_BOOTSTRAP="1"; cargo rustdoc --locked --lib --features async -- -Z unstable-options --output-format json )
+python3 scripts/law_boundary_scan.py --json "${CARGO_TARGET_DIR:-target}/doc/alice_channel.json"
+
+step "ci.yml / clippy: Clippy canary (generator tests, no drift, tests, every planted call flagged)"
+python3 scripts/test_gen_clippy_canary_calls.py
+python3 scripts/gen_clippy_canary_calls.py --check
+python3 scripts/test_clippy_canary.py
+python3 scripts/clippy_canary.py
+
+step "ci.yml / clippy: Clippy external coverage (tests, then check)"
+python3 scripts/test_clippy_external_coverage.py
+python3 scripts/clippy_external_coverage.py
+
+step "ci.yml / clippy: Identifier moves (tests, then against the release)"
+python3 scripts/test_id_move_check.py
+python3 scripts/id_move_check.py
 
 step "ci.yml / doc: Doc"
 ( export CARGO_TERM_COLOR="always" RUSTDOCFLAGS="-Dwarnings"; cargo doc --locked --no-deps )
@@ -277,6 +300,29 @@ step "ci.yml / msrv: Check on the declared rust-version"
   cargo +1.88 check --all-features
 )
 
+step "ci.yml / float-environment: run_tests.sh and build configuration guard (tests, then check)"
+python3 scripts/test_run_tests.py
+python3 scripts/test_build_config_guard.py
+python3 scripts/build_config_guard.py
+python3 scripts/test_build_flags_check.py
+
+step "ci.yml / float-environment: Shared files equal ALICE-Law's table"
+python3 scripts/test_shared_files.py
+scripts/shared_files.sh
+
+step "ci.yml / float-environment: No negated fma result (syntax tree, tests then check)"
+cargo fmt --manifest-path tools/no-outer-fneg-of-fma/Cargo.toml -- --check
+cargo test --quiet --locked --manifest-path tools/no-outer-fneg-of-fma/Cargo.toml
+cargo run --quiet --locked --release --manifest-path tools/no-outer-fneg-of-fma/Cargo.toml -- --root .
+python3 scripts/test_changed_paths.py
+python3 scripts/changed_paths.py sync
+
+step "eol.yml / public-text.yml: Line endings and public text"
+python3 scripts/test_check_eol.py
+python3 scripts/check_eol.py
+python3 scripts/test_public_text.py
+scripts/public_text.sh
+
 step "ci.yml / actionlint: actionlint"
 actionlint .github/workflows/*.yml
 
@@ -284,13 +330,22 @@ if [[ $quick -eq 1 ]]; then
   echo; echo "preflight --quick OK (test / bench suites skipped)"; exit 0
 fi
 
-step "ci.yml / test: Test (lib, integration, doctests)"
+step "ci.yml / float-environment: Float environment (debug and release)"
+scripts/run_tests.sh float_environment=2 -- cargo test --locked --test float_environment
+scripts/run_tests.sh float_environment=2 -- cargo test --locked --release --test float_environment
+
+step "ci.yml / float-environment: Effective rustc flags (default and feature async)"
+python3 scripts/build_flags_check.py -- cargo check --locked --release --lib
+python3 scripts/build_flags_check.py -- cargo check --locked --release --lib --features async
+
+for P in test release; do
+step "ci.yml / test ($P): Test (lib, integration, doctests)"
 (
-  export CARGO_TERM_COLOR="always" MIN_PASSED="26" MIN_PASSED_ASYNC="39"
+  export CARGO_TERM_COLOR="always" MIN_PASSED="72" MIN_PASSED_ASYNC="88"
   # the default shell has no pipefail: without it cargo's exit status is lost in the pipe
   set -o pipefail
   log="$(mktemp)"
-  cargo test --locked 2>&1 | tee "${log}"
+  cargo test --locked --profile "$P" 2>&1 | tee "${log}"
   passed=$(grep -E '^test result: ' "${log}" | awk '{s += $4} END {print s + 0}')
   failed=$(grep -E '^test result: ' "${log}" | awk '{s += $6} END {print s + 0}')
   echo "passed: ${passed} (minimum ${MIN_PASSED}), failed: ${failed}"
@@ -304,12 +359,13 @@ step "ci.yml / test: Test (lib, integration, doctests)"
   fi
 )
 
-step "ci.yml / test: Test (feature async)"
+step "ci.yml / test ($P): Test (feature async)"
 (
-  export CARGO_TERM_COLOR="always" MIN_PASSED="26" MIN_PASSED_ASYNC="39"
+  export CARGO_TERM_COLOR="always" MIN_PASSED="72" MIN_PASSED_ASYNC="88"
+  # the default shell has no pipefail: without it cargo's exit status is lost in the pipe
   set -o pipefail
   log="$(mktemp)"
-  cargo test --locked --features async 2>&1 | tee "${log}"
+  cargo test --locked --profile "$P" --features async 2>&1 | tee "${log}"
   passed=$(grep -E '^test result: ' "${log}" | awk '{s += $4} END {print s + 0}')
   failed=$(grep -E '^test result: ' "${log}" | awk '{s += $6} END {print s + 0}')
   echo "passed: ${passed} (minimum ${MIN_PASSED_ASYNC}), failed: ${failed}"
@@ -322,5 +378,13 @@ step "ci.yml / test: Test (feature async)"
     exit 1
   fi
 )
+
+step "ci.yml / test ($P): Law tests (semantics goldens and identifier, Noise vectors)"
+scripts/run_tests.sh semantics_golden=4,channel_semantics_id=8,noise_vectors=12 -- cargo test --locked --profile "$P" --test semantics_golden --test channel_semantics_id --test noise_vectors
+done
+
+step "g3-ir.yml: Probe tests, then no negated fma result in the release IR (host target, findings only)"
+python3 scripts/test_fneg_fma_ir_check.py
+python3 scripts/fneg_fma_ir_check.py --package alice-channel --all-features --findings-only
 
 echo; echo "preflight OK"

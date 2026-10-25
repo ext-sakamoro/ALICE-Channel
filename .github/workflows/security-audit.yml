@@ -1,0 +1,248 @@
+name: Security & Hygiene
+
+# Shared ALICE-* security layout: audit / deny / unused deps / stub guard / coverage.
+# The public API check against the latest crates.io release is semver-checks.yml, which gates.
+#
+# 目的:
+# - RustSec advisory (CVE) の週次検知
+# - dep license 逸脱 (GPL 侵入等) の block
+# - 未使用依存の炙り出し
+# - 仮実装 (panic!(STUB) / dbg!) の CI gate (todo!/unimplemented! は informational)
+
+on:
+  push:
+    # no paths here: a branch created at a SHA another ref already has gets an empty
+    # diff from GitHub's filter and the run is skipped; the changes job below compares
+    # with merge-base(origin/main) instead (patterns: .github/paths/security-audit.txt)
+    # `ci/**` runs the same checks on a branch before it is fast-forwarded onto main
+    branches: [main, 'ci/**']
+  pull_request:
+    branches: [main]
+    paths:
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'src/**'
+      - 'deny.toml'
+      - '.github/workflows/security-audit.yml'
+      - '.github/actions/**'
+      - 'scripts/changed_paths.py'
+      - '.github/paths/security-audit.txt'
+  schedule:
+    # 毎週月曜 09:00 UTC = 18:00 JST
+    - cron: '0 9 * * 1'
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_NET_RETRY: "5"
+  CARGO_HTTP_MULTIPLEXING: "false"
+
+jobs:
+  # which files changed: a new or force-pushed branch is compared with merge-base(origin/main),
+  # another push with before..after, a pull request with base...head; schedule and manual
+  # runs always run; any error runs (fail-closed) — scripts/changed_paths.py
+  changes:
+    name: Changed paths
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      run: ${{ steps.decide.outputs.run }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+      - name: decide
+        id: decide
+        env:
+          EVENT: ${{ github.event_name }}
+          BEFORE: ${{ github.event.before }}
+          AFTER: ${{ github.event.after || github.sha }}
+          CREATED: ${{ github.event.created }}
+          FORCED: ${{ github.event.forced }}
+          PR_BASE: ${{ github.event.pull_request.base.sha }}
+          PR_HEAD: ${{ github.event.pull_request.head.sha }}
+        run: >-
+          python3 scripts/changed_paths.py decide --event "$EVENT"
+          --before "$BEFORE" --after "$AFTER" --created "$CREATED" --forced "$FORCED"
+          --base "$PR_BASE" --head "$PR_HEAD"
+          --patterns-file .github/paths/security-audit.txt
+
+  audit:
+    name: cargo audit (RustSec CVE scan)
+    needs: changes
+    if: needs.changes.outputs.run == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install cargo-audit
+        run: cargo install cargo-audit --locked
+
+      # deny.toml と同期した ignore 一覧
+      - name: Run cargo audit
+        run: |
+          cargo audit \
+            --deny yanked \
+            --ignore RUSTSEC-2024-0436 \
+            --ignore RUSTSEC-2025-0141 \
+            --ignore RUSTSEC-2026-0192 \
+            --ignore RUSTSEC-2026-0204 \
+            --ignore RUSTSEC-2025-0020 \
+            --ignore RUSTSEC-2026-0176 \
+            --ignore RUSTSEC-2026-0177
+
+  deny:
+    name: cargo-deny (license + advisories + bans + sources)
+    needs: changes
+    if: needs.changes.outputs.run == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      # EmbarkStudios/cargo-deny-action@v2 は Docker container 内で稼働し、
+      # /github/workspace のみ mount するため sibling path dep が見えず fail する
+      # Installed directly: the install action resolves a different version than
+      # the pinned toolchain expects and fails on a clean runner
+      - name: Install cargo-deny
+        run: cargo install --locked cargo-deny
+
+      - name: Run cargo deny check all
+        run: cargo deny --all-features check all
+
+  unused-deps:
+    name: cargo-machete (unused dependencies)
+    needs: changes
+    if: needs.changes.outputs.run == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+
+      # false-positive は Cargo.toml の [package.metadata.cargo-machete] ignored で除外
+      - uses: bnjbvr/cargo-machete@main
+
+  stub-guard:
+    name: Stub / mock / dbg guard (grep)
+    needs: changes
+    if: needs.changes.outputs.run == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      # `todo!()` / `unimplemented!()` are the endorsed fail-fast idiom here, so
+      # fail-fast idiom として endorse されている → block しない、warn only
+      # → block 対象は panic!(STUB) (explicit STUB marker) と dbg!() のみ
+      # → comment 行 (^\s*//) は除外して source code のみ検知
+      - name: Block panic!(STUB) in src/**
+        run: |
+          set -eo pipefail
+          hits=$(grep -rnE 'panic!\([^)]*STUB' \
+            src/ --include="*.rs" \
+            --exclude-dir=bin \
+            | grep -v ':[[:space:]]*//' \
+            | grep -vE ':[[:space:]]*/\*' \
+            || true)
+          if [ -n "$hits" ]; then
+            echo "❌ Explicit STUB panic detected in src/ (production path):"
+            echo "$hits"
+            exit 1
+          fi
+          echo "✓ No panic!(STUB) in src/"
+
+      - name: Detect todo! / unimplemented! (informational, not blocking)
+        run: |
+          set -eo pipefail
+          hits=$(grep -rnE 'todo!\(|unimplemented!\(' \
+            src/ --include="*.rs" \
+            --exclude-dir=bin \
+            | grep -v ':[[:space:]]*//' \
+            | grep -vE ':[[:space:]]*/\*' \
+            || true)
+          if [ -n "$hits" ]; then
+            count=$(echo "$hits" | wc -l | tr -d ' ')
+            echo "::warning::${count} todo!()/unimplemented!() marker(s) in src/ (informational: these are the endorsed fail-fast idiom, not stubs):"
+            echo "$hits" | head -20
+          else
+            echo "✓ No todo!/unimplemented! markers in src/"
+          fi
+
+      - name: Detect dbg!() residual in src/**
+        run: |
+          set -eo pipefail
+          hits=$(grep -rn 'dbg!(' src/ --include="*.rs" || true)
+          if [ -n "$hits" ]; then
+            echo "❌ dbg!() macro left in src/:"
+            echo "$hits"
+            exit 1
+          fi
+          echo "✓ No dbg!() in src/"
+
+      - name: Detect TODO / FIXME / XXX / HACK (informational)
+        run: |
+          set -eo pipefail
+          hits=$(grep -rnE 'TODO|FIXME|XXX|HACK' src/ --include="*.rs" || true)
+          if [ -n "$hits" ]; then
+            echo "::warning::TODO/FIXME/XXX/HACK found in src/ (informational, not blocking):"
+            echo "$hits" | head -50
+          else
+            echo "✓ No TODO/FIXME/XXX/HACK in src/"
+          fi
+
+  coverage:
+    name: Coverage (cargo-llvm-cov、informational)
+    needs: changes
+    if: needs.changes.outputs.run == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: llvm-tools-preview
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install cargo-llvm-cov
+        uses: taiki-e/install-action@cargo-llvm-cov
+
+      # informational (the lib tests gate in ci.yml): the step's failure becomes a warning below;
+      # pipefail so a failing cargo llvm-cov is a failing step, not hidden behind tee
+      - name: Run coverage
+        id: coverage
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -o pipefail
+          cargo llvm-cov --lib --summary-only 2>&1 | tee coverage-summary.txt
+      # informational: the job still succeeds (the gate needs every job to succeed), the failure
+      # is reported as a warning annotation instead of being hidden
+      - name: Report a failed coverage run
+        if: steps.coverage.outcome == 'failure'
+        run: echo "::warning title=coverage::cargo llvm-cov --lib failed; see the Run coverage step and coverage-summary.txt"
+
+      - name: Upload coverage summary as artifact
+        uses: actions/upload-artifact@v6
+        with:
+          name: coverage-summary
+          path: coverage-summary.txt
+          retention-days: 30
+
+  # red when the changes job said run and a job was skipped, cancelled or failed
+  gate:
+    name: Gate
+    if: always()
+    needs: [changes, audit, deny, unused-deps, stub-guard, coverage]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v5
+      - name: gate
+        env:
+          NEEDS: ${{ toJSON(needs) }}
+        run: python3 scripts/changed_paths.py gate --needs-json "$NEEDS"

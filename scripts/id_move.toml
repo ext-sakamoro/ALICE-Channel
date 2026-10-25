@@ -1,0 +1,12 @@
+# scripts/id_move_check.py (ALICE-Law G9): the identifiers whose value may move only with a
+# breaking version, the previous-identifier list that must keep the released value, and the
+# release tags the base is read from (its values come from the published crate)
+package = "alice-channel"
+manifest = "Cargo.toml"
+tags = ["v{version}", "alice-channel-v{version}"]
+
+[exempt]
+PROTOCOL_NAME = "the Noise protocol name `Noise_IK_25519_ChaChaPoly_SHA256` padded to 32 bytes (the initial chaining key of the handshake), fixed by the Noise specification: not an identifier"
+
+[[id]]
+path = "alice_channel::semantics::CHANNEL_SEMANTICS_ID"

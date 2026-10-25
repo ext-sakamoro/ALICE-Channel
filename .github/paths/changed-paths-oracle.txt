@@ -1,0 +1,8 @@
+# the paths that run .github/workflows/changed-paths-oracle.yml (scripts/changed_paths.py decide)
+# on.pull_request.paths of the workflow must list the same patterns in the same order
+# (scripts/changed_paths.py sync)
+scripts/changed_paths.py
+scripts/test_changed_paths.py
+scripts/changed_paths_yaml_oracle.py
+.github/workflows/changed-paths-oracle.yml
+.github/paths/changed-paths-oracle.txt

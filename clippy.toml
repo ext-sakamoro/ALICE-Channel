@@ -1,0 +1,120 @@
+# Determinism gates for this crate: ALICE-Law G1 (the floating-point
+# arithmetic, first list) and G10 (OS entropy and the wall clock, further
+# down).
+#
+# The crate has no floating-point arithmetic: the handshake and the transport are
+# integer and byte operations (X25519, SHA-256, HMAC / HKDF, ChaCha20-Poly1305 from
+# alice-crypto). IEEE 754 does not require the transcendentals to be correctly
+# rounded, so the platform libm may differ between OS, CPU and compiler; this list
+# keeps a call from coming in unnoticed.
+#
+# The entries are the f32 / f64 method part of the lists ALICE-DB and
+# alice-zip use (52 entries). The libm free functions of alice-zip's list are
+# not needed: this crate does not depend on libm, so none can be named. CI
+# runs clippy with
+# `--all-targets ... -D warnings`, which turns `disallowed_methods` into a red
+# gate for the library, the tests, the examples and the benches alike.
+# scripts/clippy_canary.py plants one call per entry and fails unless clippy
+# flags each one.
+#
+# Deliberately absent: `sqrt`, `floor`, `round`, `trunc`, `ceil` and `mul_add`.
+# IEEE 754 specifies each of them exactly.
+#
+# Oracles whose expected value must not come from the implementation under
+# test (closed-form references in tests/) carry a scoped #[expect] with the
+# reason (it fails if the banned call goes away, so it cannot go stale).
+disallowed-methods = [
+    { path = "f32::sin", reason = "platform libm is not cross-platform bit-exact; use alice_det_math" },
+    { path = "f32::cos", reason = "platform libm is not cross-platform bit-exact; use alice_det_math" },
+    { path = "f32::sin_cos", reason = "platform libm is not cross-platform bit-exact; use alice_det_math" },
+    { path = "f32::tan", reason = "platform libm is not cross-platform bit-exact; use alice_det_math" },
+    { path = "f32::asin", reason = "platform libm is not cross-platform bit-exact; use alice_det_math" },
+    { path = "f32::acos", reason = "platform libm is not cross-platform bit-exact; use alice_det_math" },
+    { path = "f32::atan", reason = "platform libm is not cross-platform bit-exact; use alice_det_math" },
+    { path = "f32::atan2", reason = "platform libm is not cross-platform bit-exact; use alice_det_math" },
+    { path = "f32::sinh", reason = "platform libm is not cross-platform bit-exact; use alice_det_math" },
+    { path = "f32::cosh", reason = "platform libm is not cross-platform bit-exact; use alice_det_math" },
+    { path = "f32::tanh", reason = "platform libm is not cross-platform bit-exact; use alice_det_math" },
+    { path = "f32::asinh", reason = "platform libm is not cross-platform bit-exact; use alice_det_math" },
+    { path = "f32::acosh", reason = "platform libm is not cross-platform bit-exact; use alice_det_math" },
+    { path = "f32::atanh", reason = "platform libm is not cross-platform bit-exact; use alice_det_math" },
+    { path = "f32::exp", reason = "platform libm is not cross-platform bit-exact; use alice_det_math" },
+    { path = "f32::exp2", reason = "platform libm is not cross-platform bit-exact; use alice_det_math" },
+    { path = "f32::exp_m1", reason = "platform libm is not cross-platform bit-exact; use alice_det_math" },
+    { path = "f32::ln", reason = "platform libm is not cross-platform bit-exact; use alice_det_math" },
+    { path = "f32::ln_1p", reason = "platform libm is not cross-platform bit-exact; use alice_det_math" },
+    { path = "f32::log", reason = "platform libm is not cross-platform bit-exact; use alice_det_math" },
+    { path = "f32::log2", reason = "platform libm is not cross-platform bit-exact; use alice_det_math" },
+    { path = "f32::log10", reason = "platform libm is not cross-platform bit-exact; use alice_det_math" },
+    { path = "f32::powf", reason = "platform libm is not cross-platform bit-exact; use alice_det_math" },
+    { path = "f32::cbrt", reason = "platform libm is not cross-platform bit-exact; use alice_det_math" },
+    { path = "f32::hypot", reason = "platform libm is not cross-platform bit-exact; use alice_det_math" },
+    { path = "f32::powi", reason = "lowers to a multiplication tree of unspecified association order; use alice_det_math::powi" },
+    { path = "f64::sin", reason = "platform libm is not cross-platform bit-exact; use alice_det_math" },
+    { path = "f64::cos", reason = "platform libm is not cross-platform bit-exact; use alice_det_math" },
+    { path = "f64::sin_cos", reason = "platform libm is not cross-platform bit-exact; use alice_det_math" },
+    { path = "f64::tan", reason = "platform libm is not cross-platform bit-exact; use alice_det_math" },
+    { path = "f64::asin", reason = "platform libm is not cross-platform bit-exact; use alice_det_math" },
+    { path = "f64::acos", reason = "platform libm is not cross-platform bit-exact; use alice_det_math" },
+    { path = "f64::atan", reason = "platform libm is not cross-platform bit-exact; use alice_det_math" },
+    { path = "f64::atan2", reason = "platform libm is not cross-platform bit-exact; use alice_det_math" },
+    { path = "f64::sinh", reason = "platform libm is not cross-platform bit-exact; use alice_det_math" },
+    { path = "f64::cosh", reason = "platform libm is not cross-platform bit-exact; use alice_det_math" },
+    { path = "f64::tanh", reason = "platform libm is not cross-platform bit-exact; use alice_det_math" },
+    { path = "f64::asinh", reason = "platform libm is not cross-platform bit-exact; use alice_det_math" },
+    { path = "f64::acosh", reason = "platform libm is not cross-platform bit-exact; use alice_det_math" },
+    { path = "f64::atanh", reason = "platform libm is not cross-platform bit-exact; use alice_det_math" },
+    { path = "f64::exp", reason = "platform libm is not cross-platform bit-exact; use alice_det_math" },
+    { path = "f64::exp2", reason = "platform libm is not cross-platform bit-exact; use alice_det_math" },
+    { path = "f64::exp_m1", reason = "platform libm is not cross-platform bit-exact; use alice_det_math" },
+    { path = "f64::ln", reason = "platform libm is not cross-platform bit-exact; use alice_det_math" },
+    { path = "f64::ln_1p", reason = "platform libm is not cross-platform bit-exact; use alice_det_math" },
+    { path = "f64::log", reason = "platform libm is not cross-platform bit-exact; use alice_det_math" },
+    { path = "f64::log2", reason = "platform libm is not cross-platform bit-exact; use alice_det_math" },
+    { path = "f64::log10", reason = "platform libm is not cross-platform bit-exact; use alice_det_math" },
+    { path = "f64::powf", reason = "platform libm is not cross-platform bit-exact; use alice_det_math" },
+    { path = "f64::cbrt", reason = "platform libm is not cross-platform bit-exact; use alice_det_math" },
+    { path = "f64::hypot", reason = "platform libm is not cross-platform bit-exact; use alice_det_math" },
+    { path = "f64::powi", reason = "lowers to a multiplication tree of unspecified association order; write the multiplications out" },
+    # Determinism gate (ALICE-Law G10): no OS entropy and no wall clock where a
+    # Law-bearing result is computed. The ephemeral keys of a handshake are
+    # secret material and come from alice-crypto's random source; the transcript
+    # that the Noise vectors pin takes them as an explicit input. The two clock
+    # reads (a datagram initiation's TAI64N label, the stream handshake's read
+    # deadline) are in src/clock.rs under a scoped #[expect] each.
+    # The clock and RandomState entries are ALICE-DB's G10 entries; the
+    # getrandom entries keep a direct call from coming in.
+    # Every OS-entropy entry point of the getrandom version in Cargo.lock
+    # (0.2: getrandom and getrandom_uninit). getrandom 0.3 renames them (fill,
+    # fill_uninit, u32, u64): a bump of that dependency must update this list.
+    { path = "getrandom::getrandom", reason = "OS entropy makes a result vary from run to run; take a key (or seed) as an input" },
+    { path = "getrandom::getrandom_uninit", reason = "OS entropy makes a result vary from run to run; take a key (or seed) as an input" },
+    { path = "std::time::Instant::now", reason = "the wall clock makes results depend on timing; pass time in or use a step count" },
+    { path = "std::time::Instant::elapsed", reason = "reads the wall clock the same as Instant::now; duration_since on an already-held value is fine, this reads the clock again" },
+    { path = "std::time::SystemTime::elapsed", reason = "reads the wall clock the same as SystemTime::now; duration_since on an already-held value is fine, this reads the clock again" },
+    { path = "std::time::SystemTime::now", reason = "the wall clock makes results depend on timing; pass time in or use a step count" },
+    { path = "std::collections::hash_map::RandomState::new", reason = "seeds from OS randomness and would make HashMap iteration order non-deterministic" },
+    # ALICE-Law G2: std's float max / min may return either zero of an equal pair (it
+    # differs by target and optimisation) and clamp passes a NaN through with its
+    # payload. src/ has no float max / min / clamp; a new one must go through a Law
+    # helper (alice-det-math's max / min / clamp).
+    { path = "f32::max", reason = "either zero of an equal pair may be returned, differing by target; use a Law helper (alice-det-math)" },
+    { path = "f32::min", reason = "either zero of an equal pair may be returned, differing by target; use a Law helper (alice-det-math)" },
+    { path = "f32::clamp", reason = "passes a NaN through with its payload and panics on inverted bounds; use a Law helper (alice-det-math)" },
+    { path = "f64::max", reason = "either zero of an equal pair may be returned, differing by target; use a Law helper (alice-det-math)" },
+    { path = "f64::min", reason = "either zero of an equal pair may be returned, differing by target; use a Law helper (alice-det-math)" },
+    { path = "f64::clamp", reason = "passes a NaN through with its payload and panics on inverted bounds; use a Law helper (alice-det-math)" },
+]
+disallowed-types = [
+    # disallowed-methods cannot name RandomState::default (a trait method,
+    # not reachable via the implementing type's path alone); naming the type
+    # itself here catches ::default() too, along with any other explicit
+    # naming (a type annotation, a turbofish), without touching HashMap::new's
+    # own internal (unnamed) use of RandomState.
+    { path = "std::collections::hash_map::RandomState", reason = "seeds from OS randomness and would make HashMap iteration order non-deterministic; see disallowed-methods for RandomState::new" },
+    # ALICE-Law G13: no output of this crate may depend on hash iteration order; the
+    # crate has no hash map or set, and a new one must be a BTreeMap / BTreeSet or carry
+    # a reason at its use site.
+    { path = "std::collections::HashMap", reason = "iteration order depends on the per-instance random seed; use BTreeMap" },
+    { path = "std::collections::HashSet", reason = "iteration order depends on the per-instance random seed; use BTreeSet" },
+]

@@ -95,7 +95,7 @@ impl InitTimestamp {
     /// The label of the system clock now (before 1970 counts as 1970)
     #[must_use]
     pub fn now() -> Self {
-        let d = std::time::SystemTime::now()
+        let d = crate::clock::system_now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default();
         Self::from_unix(d.as_secs(), d.subsec_nanos())
@@ -111,7 +111,7 @@ pub enum DatagramError {
     Replayed,
     /// The counter is below the replay window
     TooOld,
-    /// The packet does not open under the keys (changed, forged, or from another session)
+    /// The packet does not open under the keys (changed, forged, or sealed under other keys)
     Decrypt,
     /// The payload is longer than [`MAX_DATAGRAM_PAYLOAD`]
     TooLong,

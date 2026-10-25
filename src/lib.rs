@@ -19,7 +19,7 @@
 //! resolves the certificate's subject to its master key through the [`PeerPolicy`], checks the certificate
 //! (issuer, validity at the policy's time, revocation), that it names the static key the handshake used, and
 //! the signature over its own transcript: a device without a known master, a revoked or expired certificate,
-//! or a signature from another session or for another static key never gets a channel. The responder writes
+//! or a signature from another handshake or for another static key never gets a channel. The responder writes
 //! its message only after verifying the initiator, so `connect` returning means the responder accepted this
 //! side. The handshake ends with a key confirmation: the initiator sends one empty message on the new keys,
 //! and the responder's `accept` returns only once it has opened it within its deadline
@@ -32,8 +32,10 @@
 
 #![warn(clippy::all, clippy::pedantic, clippy::nursery)]
 
+mod clock;
 pub mod datagram;
 pub mod noise;
+pub mod semantics;
 
 #[cfg(feature = "async")]
 mod async_channel;
@@ -370,7 +372,7 @@ fn read_before<S: Read + ReadTimeout>(
 ) -> Result<(), ChannelError> {
     let mut filled = 0;
     while filled < buf.len() {
-        let left = end.saturating_duration_since(Instant::now());
+        let left = end.saturating_duration_since(clock::now());
         if left.is_zero() {
             return Err(ChannelError::Timeout);
         }
@@ -401,7 +403,7 @@ fn read_frame_before<S: Read + ReadTimeout>(
     len: Option<usize>,
 ) -> Result<Vec<u8>, ChannelError> {
     let before = stream.read_timeout().map_err(|e| io(&e))?;
-    let end = Instant::now() + deadline;
+    let end = clock::now() + deadline;
     let read = (|| {
         let mut head = [0u8; 2];
         read_before(stream, &mut head, end)?;

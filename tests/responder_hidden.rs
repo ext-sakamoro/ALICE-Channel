@@ -3,7 +3,7 @@
 //! static key and certificate never travel to such a peer; only an initiator the responder accepts gets the
 //! second message. The scanner here speaks the Noise layer directly, so what it reads is what is on the wire.
 
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::thread;
@@ -50,7 +50,7 @@ fn party(seed: u8, name: &str) -> Party {
     }
 }
 
-struct Policy(HashMap<String, PublicKey>);
+struct Policy(BTreeMap<String, PublicKey>);
 
 impl PeerPolicy for Policy {
     fn master_of(&self, subject: &Did) -> Option<PublicKey> {

@@ -1,0 +1,237 @@
+# ALICE-Law G7 / G8 / G9 scope: every public function whose signature takes or returns
+# bytes, keyed by file and name, with its class and why no Law-bearing value crosses it
+# (scripts/law_boundary_scan.py)
+
+[[function]]
+file = "src/async_channel.rs"
+name = "handshake_hash"
+class = "handshake hash"
+reason = "the Noise handshake hash h, a SHA-256 transcript digest that binds a session"
+
+[[function]]
+file = "src/async_channel.rs"
+name = "recv"
+class = "transport message"
+reason = "the payload of a received message, opened with the session's cipher; the peer's bytes as they were sent"
+
+[[function]]
+file = "src/async_channel.rs"
+name = "send"
+class = "transport message"
+reason = "a payload sealed with the session's cipher (ChaCha20-Poly1305); the caller's bytes, no Law-bearing value"
+
+[[function]]
+file = "src/datagram.rs"
+name = "answer_repeated_response"
+class = "datagram handshake"
+reason = "the response sent again for a repeated initiation"
+
+[[function]]
+file = "src/datagram.rs"
+name = "channel"
+class = "datagram handshake"
+reason = "the datagram channel of a confirmed handshake"
+
+[[function]]
+file = "src/datagram.rs"
+name = "confirm"
+class = "datagram handshake"
+reason = "the first transport datagram that confirms a handshake"
+
+[[function]]
+file = "src/datagram.rs"
+name = "finish"
+class = "datagram handshake"
+reason = "the response datagram read by the initiator"
+
+[[function]]
+file = "src/datagram.rs"
+name = "first"
+class = "datagram handshake"
+reason = "the first datagram of a handshake"
+
+[[function]]
+file = "src/datagram.rs"
+name = "handshake_hash"
+class = "handshake hash"
+reason = "the Noise handshake hash h, a SHA-256 transcript digest that binds a session"
+
+[[function]]
+file = "src/datagram.rs"
+name = "is_first"
+class = "datagram handshake"
+reason = "whether a datagram is an initiation"
+
+[[function]]
+file = "src/datagram.rs"
+name = "open"
+class = "datagram ciphertext"
+reason = "one received datagram opened under the session's cipher"
+
+[[function]]
+file = "src/datagram.rs"
+name = "respond"
+class = "datagram handshake"
+reason = "the response datagram of the datagram handshake"
+
+[[function]]
+file = "src/datagram.rs"
+name = "respond_with_ephemeral"
+class = "datagram handshake"
+reason = "the response datagram with a given ephemeral key (the tests)"
+
+[[function]]
+file = "src/datagram.rs"
+name = "response"
+class = "datagram handshake"
+reason = "the response datagram a responder sends"
+
+[[function]]
+file = "src/datagram.rs"
+name = "seal"
+class = "datagram ciphertext"
+reason = "one datagram sealed under the session's cipher with an explicit counter"
+
+[[function]]
+file = "src/datagram.rs"
+name = "start"
+class = "datagram handshake"
+reason = "the initiation datagram of the datagram handshake"
+
+[[function]]
+file = "src/datagram.rs"
+name = "start_at"
+class = "datagram handshake"
+reason = "the initiation datagram of the datagram handshake, with its TAI64N label"
+
+[[function]]
+file = "src/datagram.rs"
+name = "start_with_ephemeral"
+class = "datagram handshake"
+reason = "the initiation datagram with a given ephemeral key (the tests)"
+
+[[function]]
+file = "src/lib.rs"
+name = "handshake_hash"
+class = "handshake hash"
+reason = "the Noise handshake hash h, a SHA-256 transcript digest that binds a session"
+
+[[function]]
+file = "src/lib.rs"
+name = "noise_static_public"
+class = "key material"
+reason = "the X25519 static public key bound to a device certificate"
+
+[[function]]
+file = "src/lib.rs"
+name = "recv"
+class = "transport message"
+reason = "the payload of a received message, opened with the session's cipher; the peer's bytes as they were sent"
+
+[[function]]
+file = "src/lib.rs"
+name = "send"
+class = "transport message"
+reason = "a payload sealed with the session's cipher (ChaCha20-Poly1305); the caller's bytes, no Law-bearing value"
+
+[[function]]
+file = "src/lib.rs"
+name = "sign_handshake"
+class = "signature"
+reason = "the device's signature over the handshake binding"
+
+[[function]]
+file = "src/noise.rs"
+name = "from_secret"
+class = "key material"
+reason = "an X25519 secret key, taken as input"
+
+[[function]]
+file = "src/noise.rs"
+name = "handshake_hash"
+class = "handshake hash"
+reason = "the Noise handshake hash h, a SHA-256 transcript digest that binds a session"
+
+[[function]]
+file = "src/noise.rs"
+name = "initiator"
+class = "handshake input"
+reason = "the prologue bytes and the peer's static public key of a handshake"
+
+[[function]]
+file = "src/noise.rs"
+name = "initiator_with_ephemeral"
+class = "handshake input"
+reason = "the prologue and keys of a handshake with a given ephemeral key (the test vectors)"
+
+[[function]]
+file = "src/noise.rs"
+name = "open"
+class = "datagram ciphertext"
+reason = "one received datagram opened under the session's cipher"
+
+[[function]]
+file = "src/noise.rs"
+name = "public"
+class = "key material"
+reason = "an X25519 public key"
+
+[[function]]
+file = "src/noise.rs"
+name = "read_message"
+class = "handshake message"
+reason = "a received Noise handshake message and its payload"
+
+[[function]]
+file = "src/noise.rs"
+name = "read_message_with_hash"
+class = "handshake message"
+reason = "a received Noise handshake message, its payload and the hash it binds"
+
+[[function]]
+file = "src/noise.rs"
+name = "recv"
+class = "transport message"
+reason = "the payload of a received message, opened with the session's cipher; the peer's bytes as they were sent"
+
+[[function]]
+file = "src/noise.rs"
+name = "remote_static"
+class = "key material"
+reason = "the peer's X25519 static public key, learnt in the handshake"
+
+[[function]]
+file = "src/noise.rs"
+name = "responder"
+class = "handshake input"
+reason = "the prologue bytes of a handshake"
+
+[[function]]
+file = "src/noise.rs"
+name = "responder_with_ephemeral"
+class = "handshake input"
+reason = "the prologue and keys of a handshake with a given ephemeral key (the test vectors)"
+
+[[function]]
+file = "src/noise.rs"
+name = "seal"
+class = "datagram ciphertext"
+reason = "one datagram sealed under the session's cipher with an explicit counter"
+
+[[function]]
+file = "src/noise.rs"
+name = "send"
+class = "transport message"
+reason = "a payload sealed with the session's cipher (ChaCha20-Poly1305); the caller's bytes, no Law-bearing value"
+
+[[function]]
+file = "src/noise.rs"
+name = "write_message"
+class = "handshake message"
+reason = "a Noise handshake message and its payload"
+
+[[function]]
+file = "src/noise.rs"
+name = "write_message_with"
+class = "handshake message"
+reason = "a Noise handshake message and its payload"

@@ -1,6 +1,7 @@
 name: CI
 
-# fmt / clippy (all targets, -D warnings) / test (with a floor on the passed-test count) / doc / actionlint
+# test (debug and release, x86_64 and aarch64, with a floor on the passed-test count) / float
+# environment / clippy (with the ALICE-Law checkers) / fmt / doc / MSRV / actionlint
 # alice-crypto, alice-identity and alice-sign are pinned by git rev in Cargo.toml: cargo fetches them
 
 on:
@@ -31,12 +32,19 @@ jobs:
           components: rustfmt
       - name: Check formatting
         run: cargo fmt -- --check
+      - name: No generated file is tracked (tests and check)
+        run: |
+          python3 scripts/test_tracked_generated_check.py
+          python3 scripts/tracked_generated_check.py
 
   clippy:
     name: Clippy (all targets, -D warnings)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
+        with:
+          # the release tags: scripts/id_move_check.py compares with the newest one
+          fetch-depth: 0
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy
@@ -45,26 +53,80 @@ jobs:
         run: cargo clippy --locked --all-targets -- -D warnings
       - name: Clippy (feature async)
         run: cargo clippy --locked --all-targets --features async -- -D warnings
+      # ALICE-Law G7 / G8 / G9 scope: no Law-bearing value crosses a byte boundary (every
+      # public function carrying bytes is in scripts/law_boundary_table.toml, and the crate
+      # has no Law-bearing module); read from the rustdoc JSON of the library
+      - name: Law boundary scan (tests, then the library's rustdoc JSON)
+        env:
+          RUSTC_BOOTSTRAP: "1"
+        run: |
+          python3 scripts/test_law_boundary_scan.py
+          cargo rustdoc --locked --lib --features async -- -Z unstable-options --output-format json
+          python3 scripts/law_boundary_scan.py --json target/doc/alice_channel.json
+      # the list in clippy.toml (ALICE-Law G1 / G13) only gates anything if clippy flags a call
+      # to it: a throwaway crate with the same clippy.toml plants one banned call per row of
+      # scripts/clippy_canary_calls.tsv (0 rows fail). The rows are generated from clippy.toml,
+      # one per disallowed-methods / disallowed-types entry; --check fails on drift
+      - name: Clippy canary data (generator tests)
+        run: python3 scripts/test_gen_clippy_canary_calls.py
+      - name: Clippy canary data (generated from clippy.toml, no drift)
+        run: python3 scripts/gen_clippy_canary_calls.py --check
+      - name: Clippy canary (tests)
+        run: python3 scripts/test_clippy_canary.py
+      - name: Clippy canary (every planted banned call is flagged)
+        run: python3 scripts/clippy_canary.py
+      # a ban on an external crate's function covers that one path: every public function of
+      # each external module the list names must be banned or allowed with a reason
+      - name: Clippy external coverage (tests)
+        run: python3 scripts/test_clippy_external_coverage.py
+      - name: Clippy external coverage (every public function of a named module is banned or allowed)
+        run: python3 scripts/clippy_external_coverage.py
+      # G9: an identifier (CHANNEL_SEMANTICS_ID) moves only with a breaking version, with both
+      # values named in CHANGELOG.md, compared with the newest release (scripts/id_move_check.py,
+      # shared with the other ALICE crates)
+      - name: Identifier moves (tests)
+        run: python3 scripts/test_id_move_check.py
+      - name: Identifier moves (the release compared with)
+        id: id-base
+        run: echo "crate=$(python3 scripts/id_move_check.py --print-base)" >> "$GITHUB_OUTPUT"
+      - uses: actions/cache@v5
+        with:
+          path: ~/.cargo/registry/cache/*/${{ steps.id-base.outputs.crate }}.crate
+          key: id-move-${{ steps.id-base.outputs.crate }}
+      - name: Identifier moves (against the release)
+        run: python3 scripts/id_move_check.py
 
   test:
-    name: Test
-    runs-on: ubuntu-latest
+    # debug and release on x86_64 (ubuntu) and aarch64 (macOS); ALICE-Law G4 / G5 check the
+    # recorded-bit goldens on every leg
+    name: Test (${{ matrix.os }}, ${{ matrix.profile }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+        profile: [debug, release]
     env:
       # the passed-test count at the commit that set it; fewer passed tests (a removed or
       # skipped test, or none at all) is a failure
-      MIN_PASSED: "26"
+      MIN_PASSED: "72"
       # with the async feature: the same tests plus tests/async_channel.rs
-      MIN_PASSED_ASYNC: "39"
+      MIN_PASSED_ASYNC: "88"
+      # the cargo profile of the leg (`test` is the debug profile cargo test uses by default)
+      CARGO_PROFILE: ${{ matrix.profile == 'release' && 'release' || 'test' }}
     steps:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+        with:
+          key: test-${{ matrix.profile }}
       - name: Test (lib, integration, doctests)
         run: |
           # the default shell has no pipefail: without it cargo's exit status is lost in the pipe
           set -o pipefail
           log="$(mktemp)"
-          cargo test --locked 2>&1 | tee "${log}"
+          cargo test --locked --profile "${CARGO_PROFILE}" 2>&1 | tee "${log}"
           passed=$(grep -E '^test result: ' "${log}" | awk '{s += $4} END {print s + 0}')
           failed=$(grep -E '^test result: ' "${log}" | awk '{s += $6} END {print s + 0}')
           echo "passed: ${passed} (minimum ${MIN_PASSED}), failed: ${failed}"
@@ -81,7 +143,7 @@ jobs:
         run: |
           set -o pipefail
           log="$(mktemp)"
-          cargo test --locked --features async 2>&1 | tee "${log}"
+          cargo test --locked --profile "${CARGO_PROFILE}" --features async 2>&1 | tee "${log}"
           passed=$(grep -E '^test result: ' "${log}" | awk '{s += $4} END {print s + 0}')
           failed=$(grep -E '^test result: ' "${log}" | awk '{s += $6} END {print s + 0}')
           echo "passed: ${passed} (minimum ${MIN_PASSED_ASYNC}), failed: ${failed}"
@@ -93,6 +155,68 @@ jobs:
             echo "::error::${passed} tests passed, fewer than ${MIN_PASSED_ASYNC}"
             exit 1
           fi
+
+      # ALICE-Law G4 / G6: the recorded-bit goldens, the identifier and the Noise vectors;
+      # scripts/run_tests.sh fails a binary that ran fewer tests than named
+      - name: Law tests (semantics goldens and identifier, Noise vectors)
+        run: scripts/run_tests.sh semantics_golden=4,channel_semantics_id=8,noise_vectors=12 -- cargo test --locked --profile "${CARGO_PROFILE}" --test semantics_golden --test channel_semantics_id --test noise_vectors
+
+  float-environment:
+    # ALICE-Law G14 on each OS: round-to-nearest-even and no flush-to-zero at run time in both
+    # profiles (scripts/run_tests.sh float_environment=2 fails unless both tests passed), the
+    # static build configuration guard, and on ubuntu / macOS the flags cargo really passes to
+    # rustc, read from `-v` in a fresh target directory (scripts/build_flags_check.py)
+    name: Float environment (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Float environment (debug and release)
+        run: |
+          scripts/run_tests.sh float_environment=2 -- cargo test --locked --test float_environment
+          scripts/run_tests.sh float_environment=2 -- cargo test --locked --release --test float_environment
+      - name: run_tests.sh and build configuration guard (tests, then check)
+        run: |
+          PY=$(command -v python3 || command -v python)
+          "$PY" scripts/test_run_tests.py
+          "$PY" scripts/test_build_config_guard.py
+          "$PY" scripts/build_config_guard.py
+          "$PY" scripts/test_build_flags_check.py
+      # ALICE-Law G11 (c): the files shared with the other crates are the bytes ALICE-Law's
+      # table records (table and checker fetched at .github/shared-files-pin, both SHA-256
+      # pinned); a difference, an unlisted shared path or nothing compared fails
+      - name: Shared files equal ALICE-Law's table
+        run: |
+          PY=$(command -v python3 || command -v python)
+          "$PY" scripts/test_shared_files.py
+          scripts/shared_files.sh
+      - name: Effective rustc flags (default and feature async)
+        if: runner.os != 'Windows'
+        run: |
+          python3 scripts/build_flags_check.py -- cargo check --locked --release --lib
+          python3 scripts/build_flags_check.py -- cargo check --locked --release --lib --features async
+      # ALICE-Law G3, syntax-tree pre-check (tools/no-outer-fneg-of-fma, byte-identical to
+      # ALICE-LOL's): its own tests, then the check over src/ tests/ examples/ benches/ with
+      # the exact fma-call counts of scripts/no-outer-fneg-of-fma-allowlist.toml (0 here);
+      # the IR half is .github/workflows/g3-ir.yml
+      - name: No negated fma result (syntax tree, tests then check)
+        run: |
+          cargo fmt --manifest-path tools/no-outer-fneg-of-fma/Cargo.toml -- --check
+          cargo test --quiet --locked --manifest-path tools/no-outer-fneg-of-fma/Cargo.toml
+          cargo run --quiet --locked --release --manifest-path tools/no-outer-fneg-of-fma/Cargo.toml -- --root .
+          # scripts/changed_paths.py decides whether the path-filtered workflows run; its own
+          # tests, then the trigger lint (no on.push paths off main, each pattern file equals
+          # its workflow's pull_request paths, the gate job needs every job)
+          python3 scripts/test_changed_paths.py
+          python3 scripts/changed_paths.py sync
 
   doc:
     name: Doc (warnings are errors)

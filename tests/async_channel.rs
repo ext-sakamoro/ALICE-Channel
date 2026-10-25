@@ -5,7 +5,7 @@
 //! or receive leaves the channel unusable (`ChannelError::Poisoned`) instead of out of step with its peer.
 #![cfg(feature = "async")]
 
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -49,7 +49,7 @@ fn device(seed: u8, name: &str) -> Device {
     Device { master, cred, did }
 }
 
-struct Policy(HashMap<String, PublicKey>);
+struct Policy(BTreeMap<String, PublicKey>);
 
 impl PeerPolicy for Policy {
     fn master_of(&self, subject: &Did) -> Option<PublicKey> {
@@ -332,7 +332,7 @@ async fn connect_gives_up_on_a_responder_that_never_answers() {
         tokio::time::sleep(Duration::from_secs(2)).await;
         drop(sb);
     });
-    let start = std::time::Instant::now();
+    let start = started();
     let r = AsyncSecureChannel::connect_with_timeout(
         sa,
         &a.cred,
@@ -342,7 +342,7 @@ async fn connect_gives_up_on_a_responder_that_never_answers() {
     )
     .await;
     assert!(matches!(r, Err(ChannelError::Timeout)), "{:?}", r.err());
-    assert!(start.elapsed() < Duration::from_millis(1_200));
+    assert!(waited(start) < Duration::from_millis(1_200));
     silent.abort();
 }
 
@@ -379,7 +379,7 @@ async fn a_confirmation_frame_of_another_length_is_refused_before_its_body() {
     let rs = b.cred.noise_static_public();
     // announce a 65 535-byte confirmation and send nothing more
     let liar = tokio::spawn(raw_initiator(a, rs, sa, u16::MAX.to_be_bytes().to_vec()));
-    let start = std::time::Instant::now();
+    let start = started();
     // the outer timeout fails the test in seconds if accept ignores its deadline
     let r = timeout(
         Duration::from_secs(10),
@@ -392,7 +392,7 @@ async fn a_confirmation_frame_of_another_length_is_refused_before_its_body() {
         "{:?}",
         r.err()
     );
-    assert!(start.elapsed() < Duration::from_millis(500));
+    assert!(waited(start) < Duration::from_millis(500));
     liar.abort();
 }
 
@@ -404,7 +404,7 @@ async fn accept_gives_up_on_an_initiator_that_never_confirms() {
     let pb = knowing(&[&a]);
     let rs = b.cred.noise_static_public();
     let silent = tokio::spawn(raw_initiator(a, rs, sa, Vec::new()));
-    let start = std::time::Instant::now();
+    let start = started();
     // the outer timeout fails the test in seconds if accept ignores its deadline
     let r = timeout(
         Duration::from_secs(5),
@@ -413,7 +413,7 @@ async fn accept_gives_up_on_an_initiator_that_never_confirms() {
     .await
     .expect("accept did not return");
     assert!(matches!(r, Err(ChannelError::Timeout)), "{:?}", r.err());
-    assert!(start.elapsed() < Duration::from_millis(1_200));
+    assert!(waited(start) < Duration::from_millis(1_200));
     silent.abort();
 }
 
@@ -578,7 +578,7 @@ async fn accept_drops_a_silent_dialer_at_the_deadline() {
     let b = device(2, "bob");
     let (mut sa, sb) = duplex(64 * 1024);
     let pb = knowing(&[]);
-    let start = std::time::Instant::now();
+    let start = started();
     // the outer timeout fails the test in seconds if accept ignores its deadline
     let r = timeout(
         Duration::from_secs(5),
@@ -587,7 +587,7 @@ async fn accept_drops_a_silent_dialer_at_the_deadline() {
     .await
     .expect("accept did not return");
     assert!(matches!(r, Err(ChannelError::Timeout)), "{:?}", r.err());
-    assert!(start.elapsed() < Duration::from_millis(1_200));
+    assert!(waited(start) < Duration::from_millis(1_200));
     // the responder's side is gone and nothing was written
     let mut got = Vec::new();
     timeout(Duration::from_secs(2), sa.read_to_end(&mut got))
@@ -595,4 +595,22 @@ async fn accept_drops_a_silent_dialer_at_the_deadline() {
         .unwrap()
         .unwrap();
     assert!(got.is_empty());
+}
+
+/// The wall clock of the timing tests (how long a deadline takes; no Law value)
+#[expect(
+    clippy::disallowed_methods,
+    reason = "a timing test measures a deadline on the monotonic clock"
+)]
+fn started() -> std::time::Instant {
+    std::time::Instant::now()
+}
+
+/// The time since `start` (see [`started`])
+#[expect(
+    clippy::disallowed_methods,
+    reason = "a timing test measures a deadline on the monotonic clock"
+)]
+fn waited(start: std::time::Instant) -> std::time::Duration {
+    start.elapsed()
 }

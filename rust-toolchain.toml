@@ -1,6 +1,9 @@
-# Rust toolchain pin
+# Rust toolchain pin. Without it, clippy's MSRV-aware lints flip between
+# machines: a newer toolchain proposes APIs that the declared MSRV rejects,
+# so the same code is clean locally and red in CI.
 [toolchain]
-channel = "1.92.0"
+channel = "1.98.1"
 components = ["rustfmt", "clippy"]
+# no_std 検証用 target (CI no_std job + local、pinned toolchain 側に install)
+targets = ["thumbv7em-none-eabihf", "wasm32-unknown-unknown"]
 profile = "minimal"
-

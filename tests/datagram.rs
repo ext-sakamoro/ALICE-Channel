@@ -5,7 +5,7 @@
 //! lost or repeated packet: the initiator repeats its first packet, the responder answers a repeated first
 //! packet with the same response, and the first data packet that opens confirms the keys.
 
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 
 use alice_channel::datagram::{
     Confirmed, DatagramChannel, DatagramError, InitTimestamp, Initiator, Pending, Responder,
@@ -51,7 +51,7 @@ fn party(seed: u8, name: &str) -> Party {
 }
 
 struct Policy {
-    masters: HashMap<String, PublicKey>,
+    masters: BTreeMap<String, PublicKey>,
 }
 
 impl Policy {

@@ -1,0 +1,111 @@
+name: Workflow reader vs PyYAML
+
+# scripts/changed_paths.py reads workflow files with its own strict reader of the YAML subset
+# they use (stdlib only, shared byte-identical by the ALICE crates). This workflow compares that
+# reader with PyYAML (pinned) over the workflows of every public ALICE repository: a tree that
+# differs fails, a refused file is listed (fail-closed), and nothing compared fails. It runs when
+# the reader or its tests change, and weekly (other repositories add new workflow forms).
+
+on:
+  push:
+    # no paths here: a branch created at a SHA another ref already has gets an empty
+    # diff from GitHub's filter and the run is skipped; the changes job below compares
+    # with merge-base(origin/main) instead (patterns: .github/paths/changed-paths-oracle.txt)
+    branches: [main, 'ci/**']
+  pull_request:
+    branches: [main]
+    paths:
+      - 'scripts/changed_paths.py'
+      - 'scripts/test_changed_paths.py'
+      - 'scripts/changed_paths_yaml_oracle.py'
+      - '.github/workflows/changed-paths-oracle.yml'
+      - '.github/paths/changed-paths-oracle.txt'
+  schedule:
+    - cron: '41 4 * * 3'
+  workflow_dispatch:
+
+# a superseded run on a branch is cancelled; on main each commit has a group of its own
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref == 'refs/heads/main' && github.sha || github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+permissions:
+  contents: read
+
+jobs:
+  # which files changed: a new or force-pushed branch is compared with merge-base(origin/main),
+  # another push with before..after, a pull request with base...head; schedule and manual
+  # runs always run; any error runs (fail-closed) — scripts/changed_paths.py
+  changes:
+    name: Changed paths
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      run: ${{ steps.decide.outputs.run }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+      - name: decide
+        id: decide
+        env:
+          EVENT: ${{ github.event_name }}
+          BEFORE: ${{ github.event.before }}
+          AFTER: ${{ github.event.after || github.sha }}
+          CREATED: ${{ github.event.created }}
+          FORCED: ${{ github.event.forced }}
+          PR_BASE: ${{ github.event.pull_request.base.sha }}
+          PR_HEAD: ${{ github.event.pull_request.head.sha }}
+        run: >-
+          python3 scripts/changed_paths.py decide --event "$EVENT"
+          --before "$BEFORE" --after "$AFTER" --created "$CREATED" --forced "$FORCED"
+          --base "$PR_BASE" --head "$PR_HEAD"
+          --patterns-file .github/paths/changed-paths-oracle.txt
+
+  oracle:
+    name: Reader tree == yaml.safe_load (public ALICE workflows)
+    needs: changes
+    if: needs.changes.outputs.run == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - name: PyYAML (pinned)
+        run: python -m pip install pyyaml==6.0.2
+      # the workflow directories only (sparse, no history); the list comes from the API so a new
+      # public repository is compared without editing this file
+      - name: Fetch the workflows of the public ALICE repositories
+        env:
+          GH_TOKEN: ${{ github.token }}
+          OWNER: ${{ github.repository_owner }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/corpus"
+          gh repo list "$OWNER" --visibility public --limit 1000 --json name --jq '.[].name' \
+            | grep -E '^(ALICE-[A-Za-z0-9-]+|text-to-print)$' > "$RUNNER_TEMP/repos.txt"
+          n=$(wc -l < "$RUNNER_TEMP/repos.txt")
+          echo "public repositories: $n"
+          if [ "$n" -lt 50 ]; then echo "::error::only $n public repositories listed"; exit 1; fi
+          while IFS= read -r r; do
+            git clone -q --depth 1 --filter=blob:none --sparse "https://github.com/$OWNER/$r" "$RUNNER_TEMP/corpus/$r"
+            git -C "$RUNNER_TEMP/corpus/$r" sparse-checkout set .github/workflows
+          done < "$RUNNER_TEMP/repos.txt"
+      - name: Compare
+        run: python scripts/changed_paths_yaml_oracle.py --fuzz 5000 . "$RUNNER_TEMP"/corpus/*
+
+  # red when the changes job said run and a job was skipped, cancelled or failed
+  gate:
+    name: Gate
+    if: always()
+    needs: [changes, oracle]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v5
+      - name: gate
+        env:
+          NEEDS: ${{ toJSON(needs) }}
+        run: python3 scripts/changed_paths.py gate --needs-json "$NEEDS"

@@ -5,7 +5,7 @@
 //! revocation list and the time, then the signature over its own transcript. The digest is recomputed here
 //! from that rule, not taken from the code under test.
 
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::thread;
@@ -56,7 +56,7 @@ fn party(seed: u8, name: &str, cert_id: [u8; 16]) -> Party {
 }
 
 struct Policy {
-    masters: HashMap<String, PublicKey>,
+    masters: BTreeMap<String, PublicKey>,
     revocations: Option<CertRevocations>,
     now: u64,
 }
@@ -483,7 +483,7 @@ fn a_credential_needs_the_device_key_and_the_static_key_its_certificate_names() 
 #[test]
 fn connect_gives_up_on_a_responder_that_never_answers() {
     // a responder that reads the first message and stays silent: connect ends with Timeout
-    use std::time::{Duration, Instant};
+    use std::time::Duration;
     let a = party(1, "alice", [1; 16]);
     let b = party(2, "bob", [2; 16]);
     let policy_a = Policy::knowing(&[&b]);
@@ -494,7 +494,7 @@ fn connect_gives_up_on_a_responder_that_never_answers() {
             std::thread::sleep(Duration::from_millis(1_500));
         },
         |s| {
-            let start = Instant::now();
+            let start = started();
             let r = SecureChannel::connect_with_timeout(
                 s,
                 &a.cred,
@@ -502,7 +502,7 @@ fn connect_gives_up_on_a_responder_that_never_answers() {
                 &b_cert,
                 Duration::from_millis(300),
             );
-            (r.err(), start.elapsed())
+            (r.err(), waited(start))
         },
     );
     let (err, took) = client;
@@ -600,9 +600,9 @@ fn accept_against(
     let cred_b = b.cred;
     let (server, ()) = pair(
         move |s| {
-            let start = std::time::Instant::now();
+            let start = started();
             let r = SecureChannel::accept_with_timeout(s, &cred_b, &policy_b, deadline);
-            (r.err(), start.elapsed())
+            (r.err(), waited(start))
         },
         raw_initiator(a, rs, confirm),
     );
@@ -686,16 +686,16 @@ fn a_replayed_first_message_yields_no_channel() {
 fn accept_drops_a_silent_dialer_at_the_deadline_without_writing() {
     // a connection that opens and sends nothing: accept ends with Timeout at its deadline, and the
     // dialer reads nothing back
-    use std::time::{Duration, Instant};
+    use std::time::Duration;
     let b = party(2, "bob", [2; 16]);
     let policy_b = Policy::knowing(&[]);
     let cred_b = b.cred;
     let deadline = Duration::from_millis(300);
     let (server, read) = pair(
         move |s| {
-            let start = Instant::now();
+            let start = started();
             let r = SecureChannel::accept_with_timeout(s, &cred_b, &policy_b, deadline);
-            (r.err(), start.elapsed())
+            (r.err(), waited(start))
         },
         |mut s| {
             s.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
@@ -714,16 +714,16 @@ fn accept_drops_a_silent_dialer_at_the_deadline_without_writing() {
 fn the_first_message_deadline_is_total_not_per_read() {
     // a dialer that sends its first frame one byte every 0.6 x the deadline: each read would finish in
     // time, the whole never does
-    use std::time::{Duration, Instant};
+    use std::time::Duration;
     let b = party(2, "bob", [2; 16]);
     let policy_b = Policy::knowing(&[]);
     let cred_b = b.cred;
     let deadline = Duration::from_millis(400);
     let (server, ()) = pair(
         move |s| {
-            let start = Instant::now();
+            let start = started();
             let r = SecureChannel::accept_with_timeout(s, &cred_b, &policy_b, deadline);
-            (r.err(), start.elapsed())
+            (r.err(), waited(start))
         },
         move |mut s| {
             for b in [0u8, 96, 1, 2, 3, 4, 5] {
@@ -737,4 +737,22 @@ fn the_first_message_deadline_is_total_not_per_read() {
     let (err, took) = server;
     assert!(matches!(err, Some(ChannelError::Timeout)), "{err:?}");
     assert!(took < deadline * 2, "accept waited {took:?}");
+}
+
+/// The wall clock of the timing tests (how long a deadline takes; no Law value)
+#[expect(
+    clippy::disallowed_methods,
+    reason = "a timing test measures a deadline on the monotonic clock"
+)]
+fn started() -> std::time::Instant {
+    std::time::Instant::now()
+}
+
+/// The time since `start` (see [`started`])
+#[expect(
+    clippy::disallowed_methods,
+    reason = "a timing test measures a deadline on the monotonic clock"
+)]
+fn waited(start: std::time::Instant) -> std::time::Duration {
+    start.elapsed()
 }
