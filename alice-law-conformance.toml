@@ -21,7 +21,7 @@ evidence = [
     "scripts/clippy_canary.py with scripts/clippy_canary_calls.tsv, which scripts/gen_clippy_canary_calls.py generates from clippy.toml with one row per disallowed-methods / disallowed-types entry (68 planted, 0 skipped; f64::sin and f64::exp are the rows `scripts/clippy_canary_calls.tsv#let _ = f64::sin;` and `scripts/clippy_canary_calls.tsv#let _ = f64::exp;`): each call is planted in a throwaway crate that copies clippy.toml and must get exactly one disallowed diagnostic naming it, every clippy.toml entry must have exactly one row, 0 rows or 0 entries fail; scripts/test_clippy_canary.py and scripts/test_gen_clippy_canary_calls.py; run by `.github/workflows/ci.yml#- name: Clippy canary (every planted banned call is flagged)` and `scripts/preflight.sh#step \"ci.yml / clippy: Clippy canary (generator tests, no drift, tests, every planted call flagged)\"`",
     "Cargo.toml has no libm dependency and Cargo.lock has no libm package, so no libm free function can be named from this crate's source; every float transcendental is a method on f32 / f64, which the list covers",
 ]
-mutant = "measured 2026-10-25, each reverted: deleting the f64::exp entry from clippy.toml makes scripts/clippy_canary.py exit 1 with `data line 50: f64::exp is not listed under disallowed-methods in clippy.toml`; appending `pub fn g1_mutant() -> f64 { core::hint::black_box(0.5_f64).sin() }` to src/lib.rs makes the all-targets clippy step exit 101 with `use of a disallowed method f64::sin`"
+mutant = "measured 2026-10-25, each reverted: deleting the f64::exp entry from clippy.toml makes scripts/clippy_canary.py exit 1 naming the f64::exp data row as not listed under disallowed-methods in clippy.toml; appending `pub fn g1_mutant() -> f64 { core::hint::black_box(0.5_f64).sin() }` to src/lib.rs makes the all-targets clippy step exit 101 with `use of a disallowed method f64::sin`"
 since = ""
 note = "src/ has no floating-point arithmetic, so every banned method has 0 sites in every linted set and no test needs an exception."
 reference_repo = "ALICE-DB"
@@ -97,7 +97,7 @@ evidence = [
     "scripts/test_law_boundary_scan.py: the scanner's own tests, including test_this_crate_has_no_law_bearing_module",
     ".github/workflows/ci.yml clippy job `.github/workflows/ci.yml#- name: Law boundary scan (tests, then the library's rustdoc JSON)` and scripts/preflight.sh",
 ]
-mutant = "measured 2026-10-25, reverted: a `pub fn law_bytes() -> [u8; 8]` in src/semantics.rs makes the scan exit 1 with `src/semantics.rs:80 law_bytes: a byte boundary not in scripts/law_boundary_table.toml` (50 byte-boundary functions, 39 table entries, 1 problem)"
+mutant = "measured 2026-10-25, reverted: a `pub fn law_bytes() -> [u8; 8]` in src/semantics.rs makes the scan exit 1 naming law_bytes in src/semantics.rs as a byte boundary not in scripts/law_boundary_table.toml (50 byte-boundary functions, 39 table entries, 1 problem)"
 note = "no Law-bearing value of this crate crosses a crate boundary as bytes: everything the crate puts on the wire is ciphertext, keys, certificates and framing, and every public function carrying bytes is in scripts/law_boundary_table.toml with its class. CHANNEL_SEMANTICS_ID is a constant returned in the same process."
 reference_repo = "ALICE-Crypto"
 
