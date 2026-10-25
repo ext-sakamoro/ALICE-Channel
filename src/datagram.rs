@@ -117,7 +117,7 @@ pub enum DatagramError {
     TooLong,
     /// An empty payload is not sent (an empty data packet is the key confirmation)
     Empty,
-    /// The counters of this session are spent
+    /// The counters of this channel are spent
     CounterExhausted,
 }
 

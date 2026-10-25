@@ -4,6 +4,14 @@ All notable changes to ALICE-Channel are documented here. While crates.io is fro
 
 ## [Unreleased]
 
+### Changed
+
+- CI (ALICE-Law): `alice-law-conformance.toml` を足した (G1-G6 / G10 / G12-G14 は pass、G7-G9 は n/a、G11 は fail-known) 共有の file (ALICE-Law 0a5de01 の表で ALICE-Crypto が持つ 81 行) を表の bytes で置き、`scripts/shared_files.sh` と `scripts/public_text.sh` が pin した revision の検査器で比べる
+- CI: test を debug / release x x86_64 / aarch64 にし、記録した bit の golden (`tests/semantics_golden.rs`)、識別子 (`tests/channel_semantics_id.rs`)、Noise の vector を `scripts/run_tests.sh` で件数つきで走らせる float-environment job (ubuntu / macOS / Windows)、clippy の canary と外部 module の網羅、Law 境界の走査、識別子の移動の検査、g3-ir / semver-checks / security-audit / eol / public-text の workflow を足した
+- clippy.toml: 浮動小数の超越関数と max / min / clamp、時計、OS 乱数、`HashMap` / `HashSet` / `RandomState` を禁止した 時計は `src/clock.rs` の 2 関数だけが読む
+- 試験の `HashMap` を `BTreeMap` にした
+- `.gitattributes`: text file を全 OS で LF で取り出す
+
 ### 破壊的変更
 
 - `ChannelError` に `StaleInit` を足した (網羅的な match は腕が要る)
@@ -20,6 +28,7 @@ All notable changes to ALICE-Channel are documented here. While crates.io is fro
 
 ### Added
 
+- `semantics::CHANNEL_SEMANTICS_ID` (`7808060196ea5d8d…a76916d92`): 固定の鍵の handshake と transport、datagram の golden と alice-crypto の `CRYPTO_SEMANTICS_ID` の fold `CHANNEL_SEMANTICS_PINS` / `CHANNEL_SEMANTICS_CHECKED_AT`
 - `datagram`: 失われ・並べ替わり・重なる datagram の上で、stream の channel と同じ Noise IK と証明書の束縛を張る (I/O を持たない、呼び出し側が packet を送り受けた packet を渡す) packet は種類 1 byte (`KIND_INIT` / `KIND_RESPONSE` / `KIND_DATA`) で始まり、data の packet は明示の 64 bit の counter (little-endian) を nonce に 1 つずつ封じる (associated data `alice-channel/datagram/v1`) 受け手は開いた最大の counter の下 `REPLAY_WINDOW` = 1024 の窓を持ち、各 counter を 1 回だけどの順でも開く (開いたものは `Replayed`、窓より下は `TooOld`、窓に記録するのは開いた後だけなので変えた・偽の packet は何も動かさない) handshake: `Initiator::start` (`start_at` で時刻を渡す) / `first` (届くまで繰り返す) / `finish`、`Responder::new().respond` → `Pending` (`is_first` で繰り返しを見分け `response` を送り直す、`confirm` は新しい鍵で開いた最初の data の packet で channel を返す: 空の確認でも、それが失われた時の次の data でも)、`DatagramChannel::answer_repeated_response` (応答が繰り返された時に新しい確認を返す) 空の payload は送らない (`Empty`、空の data の packet は確認) 発信側の暗号化した payload の先頭に TAI64N の時刻 (`InitTimestamp`、12 byte) を置き、`Responder` は同じ静的鍵から最後に受け入れた時刻より後の init だけに答える (古い init を後で再送されても何も始まらない、`ChannelError::StaleInit`) 試験用に固定の ephemeral の `Initiator::start_with_ephemeral` / `Responder::respond_with_ephemeral` と、その packet を byte で固定する試験
 - noise 層: `Transport::into_datagram` → `DatagramTransport` (明示の counter で `seal` / `open`、transport を消費するので同じ鍵を 2 つの形で使わない)
 - `check_cert`: 証明書を policy の今の状態 (master key、時刻、revocation list) で検査する

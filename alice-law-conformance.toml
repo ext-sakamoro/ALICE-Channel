@@ -1,0 +1,181 @@
+# ALICE-Law conformance manifest for this crate (alice-channel). One entry per
+# gate defined in ALICE-Law's conformance/gates.toml; the schema (status /
+# evidence / since / note / reference_repo) is the "Manifest" section of
+# docs/CONFORMANCE.md in that repository.
+#
+# Every entry was written from a measurement on this repository at the commit
+# this file is added on: the library and test suites were run (debug and
+# release profile, default and async features), clippy was run with the
+# crate's own configuration, and every `pass` carries a measured mutant; `n/a`
+# (G7 to G9) is measured by scripts/law_boundary_scan.py. The crate has no
+# floating-point arithmetic: the handshake and the transport are integer and
+# byte operations (X25519, SHA-256 / HMAC / HKDF and ChaCha20-Poly1305 come from
+# alice-crypto). What it puts on the wire for fixed keys is pinned by
+# tests/semantics_golden.rs and folded into CHANNEL_SEMANTICS_ID.
+
+[G1]
+status = "pass"
+evidence = [
+    "clippy.toml disallowed-methods (`clippy.toml#disallowed-methods = [`: every f32 and f64 method gates.toml marks banned, f64::sin at `clippy.toml#path = \"f64::sin\"` and f64::exp at `clippy.toml#path = \"f64::exp\"` among them); the entries are the f32 / f64 method part of the ALICE-DB and alice-zip lists (52 entries; the libm free functions of the alice-zip list are not needed, see the last item)",
+    ".github/workflows/ci.yml clippy job: all targets `.github/workflows/ci.yml#- name: Clippy\n` and with the async feature `.github/workflows/ci.yml#- name: Clippy (feature async)`, both -D warnings; scripts/preflight.sh `scripts/preflight.sh#step \"ci.yml / clippy: Clippy\"` and `scripts/preflight.sh#step \"ci.yml / clippy: Clippy (feature async)\"` run the same sets. The only cfg in src/ is the async feature, so the two sets lint every line of it",
+    "scripts/clippy_canary.py with scripts/clippy_canary_calls.tsv, which scripts/gen_clippy_canary_calls.py generates from clippy.toml with one row per disallowed-methods / disallowed-types entry (68 planted, 0 skipped; f64::sin and f64::exp are the rows `scripts/clippy_canary_calls.tsv#let _ = f64::sin;` and `scripts/clippy_canary_calls.tsv#let _ = f64::exp;`): each call is planted in a throwaway crate that copies clippy.toml and must get exactly one disallowed diagnostic naming it, every clippy.toml entry must have exactly one row, 0 rows or 0 entries fail; scripts/test_clippy_canary.py and scripts/test_gen_clippy_canary_calls.py; run by `.github/workflows/ci.yml#- name: Clippy canary (every planted banned call is flagged)` and `scripts/preflight.sh#step \"ci.yml / clippy: Clippy canary (generator tests, no drift, tests, every planted call flagged)\"`",
+    "Cargo.toml has no libm dependency and Cargo.lock has no libm package, so no libm free function can be named from this crate's source; every float transcendental is a method on f32 / f64, which the list covers",
+]
+mutant = "measured 2026-10-25, each reverted: deleting the f64::exp entry from clippy.toml makes scripts/clippy_canary.py exit 1 with `data line 50: f64::exp is not listed under disallowed-methods in clippy.toml`; appending `pub fn g1_mutant() -> f64 { core::hint::black_box(0.5_f64).sin() }` to src/lib.rs makes the all-targets clippy step exit 101 with `use of a disallowed method f64::sin`"
+since = ""
+note = "src/ has no floating-point arithmetic, so every banned method has 0 sites in every linted set and no test needs an exception."
+reference_repo = "ALICE-DB"
+
+[G2]
+status = "pass"
+evidence = [
+    "clippy.toml `clippy.toml#path = \"f32::max\"`, `clippy.toml#path = \"f32::min\"`, `clippy.toml#path = \"f32::clamp\"`, `clippy.toml#path = \"f64::max\"`, `clippy.toml#path = \"f64::min\"`, `clippy.toml#path = \"f64::clamp\"`: f32 / f64 max, min and clamp banned in every target, no exception (so no raw_* manifest)",
+    "src/ names no f32 or f64 (grep -rlE '\\bf(32|64)\\b' src/ finds nothing), so no public function returns a max or min of float inputs: no scalar site class, tie_tests = []",
+    "scripts/clippy_canary.py with scripts/clippy_canary_calls.tsv (68 planted, the six G2 entries among them, each flagged)",
+]
+mutant = "measured 2026-10-25, reverted: appending `pub fn g2_mutant(a: f64, b: f64) -> f64 { a.max(b) }` to src/lib.rs makes the all-targets clippy step exit 101 with `use of a disallowed method f64::max`"
+since = ""
+note = "no site class exists in src/, so there is no tie test to carry (a new site would be refused by clippy before it could exist). The crate has no SIMD code, so no per-width test."
+reference_repo = "ALICE-Kinematics"
+tie_tests = []
+
+[G3]
+status = "pass"
+evidence = [
+    "tools/no-outer-fneg-of-fma/src/main.rs (syntax-tree pre-check, byte-identical to ALICE-LOL's), tools/no-outer-fneg-of-fma/Cargo.toml and tools/no-outer-fneg-of-fma/Cargo.lock (byte-identical; built and tested with --locked)",
+    "scripts/fneg_fma_ir_check.py (the gate, byte-identical to ALICE-LOL's: the release LLVM IR of alice-channel with all features; a negation whose operand traces back to a fma call fails at the crate's own source line; a missing or empty .ll, a module without functions, or a missing floor fails)",
+    "scripts/test_fneg_fma_ir_check.py with tools/fneg-fma-ir-probes/*.rs (byte-identical to ALICE-LOL's)",
+    "scripts/no-outer-fneg-of-fma-allowlist.toml (expected-fma-calls 0 and expected-src-fma-calls 0, compared exactly; [[ir]] floors 0 for x86_64-unknown-linux-gnu and aarch64-unknown-linux-gnu; no [[allow]] entry)",
+    ".github/workflows/ci.yml float-environment job (ubuntu, macOS, Windows): the tool's tests and the check `.github/workflows/ci.yml#- name: No negated fma result (syntax tree, tests then check)`",
+    ".github/workflows/g3-ir.yml (x86_64-unknown-linux-gnu and aarch64-unknown-linux-gnu; a changes job decides the run from merge-base(origin/main) with scripts/changed_paths.py and .github/paths/g3-ir.txt, a gate job is red when the IR job should have run and did not, and weekly)",
+]
+mutant = "measured 2026-10-25, reverted: `pub fn g3_mutant(a: f32, b: f32, c: f32) -> f32 { -a.mul_add(b, c) }` appended to src/lib.rs makes tools/no-outer-fneg-of-fma exit 1 (naming the appended line, and expected-fma-calls / expected-src-fma-calls = 0 against 1 found) and scripts/fneg_fma_ir_check.py exit 1 (`fneg of a fma result in` g3_mutant at src/lib.rs, aarch64-apple-darwin, 288 functions, 1 fma call, 1 negated)"
+since = ""
+note = "no fused multiply-add call in the library sources: the syntax-tree check counts 0 fma-family calls against the declared 0, so the first new call fails on the count and a negated one fails on the form. Residual: a generic or #[inline] function inlined into another crate is in that crate's IR."
+reference_repo = "ALICE-LOL"
+
+[G4]
+status = "pass"
+evidence = [
+    "tests/semantics_golden.rs: the Noise IK handshake of fixed static and ephemeral keys with three transport messages each way (`tests/semantics_golden.rs#fn the_handshake_and_transport_are_the_recorded_bits`) and five datagrams sealed after the same handshake (`tests/semantics_golden.rs#fn datagrams_are_the_recorded_bits`), each the SHA-256 of every byte produced; checker_rejects_a_wrong_digest (a moved digest does not match) and checker_rejects_a_scenario_that_produced_nothing",
+    "tests/noise_vectors.rs: the public IK test vectors (cacophony), the independent oracle of the handshake itself",
+    ".github/workflows/ci.yml test job `.github/workflows/ci.yml#jobs:>test:`: os [ubuntu-latest (x86_64), macos-latest (aarch64)] x profile [debug, release], each leg running `.github/workflows/ci.yml#- name: Law tests (semantics goldens and identifier, Noise vectors)` through scripts/run_tests.sh semantics_golden=4,channel_semantics_id=8,noise_vectors=12, which fails a leg that ran fewer tests than named",
+]
+mutant = "measured 2026-10-25, reverted: the datagram counter advanced by 2 instead of 1 in DatagramTransport::seal (src/noise.rs `self.next = counter + 1;` → `+ 2`; every datagram still opens) fails datagrams_are_the_recorded_bits in debug and in release (`datagram transport golden moved: 076dbde6…, recorded d6945135…`)"
+since = ""
+note = "the digests are recorded from the current build; tests/noise_vectors.rs pins the handshake against published vectors independently of the recording. The crate has no floating-point value, so there is no signed-zero, NaN or subnormal edge case to pin."
+reference_repo = "ALICE-DB"
+
+[G5]
+status = "pass"
+evidence = [
+    ".github/workflows/ci.yml test job `.github/workflows/ci.yml#jobs:>test:` with profile release on ubuntu-latest (x86_64) and macos-latest (aarch64): cargo test --profile release with the default and the async feature (with the passed-test floors MIN_PASSED and MIN_PASSED_ASYNC), and the Law tests through scripts/run_tests.sh with minimum counts",
+    "scripts/preflight.sh runs the same steps for both profiles in its full part (`scripts/preflight.sh#for P in test release; do`)",
+]
+mutant = "the release leg runs the same binaries as the debug leg under the release profile; the G4 mutant (datagram counter step 2) fails the release leg as it fails the debug one (measured 2026-10-25); scripts/run_tests.sh fails a leg whose binary ran fewer tests than named (scripts/test_run_tests.py)"
+since = ""
+note = "the aarch64 release leg is macOS (Apple Silicon)."
+reference_repo = "ALICE-DB"
+
+[G6]
+status = "pass"
+evidence = [
+    "`src/semantics.rs#pub const CHANNEL_SEMANTICS_ID` (7808060196ea5d8d…a76916d92: the fold of CHANNEL_SEMANTICS_PINS at `src/semantics.rs#pub const CHANNEL_SEMANTICS_PINS`, the two recorded-bit scenarios of tests/semantics_golden.rs and alice-crypto's CRYPTO_SEMANTICS_ID; fold of alice-det-math) and `src/semantics.rs#pub const CHANNEL_SEMANTICS_CHECKED_AT` (0.1.0, 1.98.1)",
+    "tests/channel_semantics_id.rs (8 tests: the entries are exactly the recorded goldens, the alice-crypto entry is the identifier of the alice-crypto revision Cargo.toml pins, the fold, the recorded value, one changed bit moves it, no cfg, version and toolchain: Cargo.toml, rust-toolchain.toml and the running rustc -V, and no other test file records a golden)",
+    ".github/workflows/ci.yml Law tests step (debug and release, x86_64 and aarch64): scripts/run_tests.sh … channel_semantics_id=8",
+]
+mutant = "measured 2026-10-25, each reverted: the datagram entry of CHANNEL_SEMANTICS_PINS changed in its last digit without its golden fails the_entries_are_exactly_the_recorded_goldens and the_identifier_is_the_fold_of_the_table; CHANNEL_SEMANTICS_CHECKED_AT at 0.0.9 fails the_pins_were_checked_on_this_version_and_toolchain (`crate version`); the G4 mutant (datagram counter step 2) fails datagrams_are_the_recorded_bits"
+since = ""
+note = "the upstream entry is alice-crypto's identifier (X25519, SHA-256 / HMAC / HKDF and ChaCha20-Poly1305 come from it); alice-identity and alice-sign carry certificates and signatures, which the goldens do not exercise. The identifier is published as a constant; no wire or file of this crate carries it (G7 / G8 n/a)."
+reference_repo = "ALICE-Crypto"
+
+[G7]
+status = "n/a"
+evidence = [
+    "scripts/law_boundary_scan.py: reads the rustdoc JSON of the library (feature async) and lists every public function taking or returning bytes; fails on an unlisted one, a listed one gone, or a scan that compared nothing; this crate names no Law-bearing module (`scripts/law_boundary_scan.py#LAW_FILES: tuple[str, ...] = ()`)",
+    "scripts/law_boundary_table.toml: the 39 (file, name) entries covering 49 functions, with their classes (handshake and transport messages, datagram packets, keys, certificates, the handshake hash)",
+    "scripts/test_law_boundary_scan.py: the scanner's own tests, including test_this_crate_has_no_law_bearing_module",
+    ".github/workflows/ci.yml clippy job `.github/workflows/ci.yml#- name: Law boundary scan (tests, then the library's rustdoc JSON)` and scripts/preflight.sh",
+]
+mutant = "measured 2026-10-25, reverted: a `pub fn law_bytes() -> [u8; 8]` in src/semantics.rs makes the scan exit 1 with `src/semantics.rs:80 law_bytes: a byte boundary not in scripts/law_boundary_table.toml` (50 byte-boundary functions, 39 table entries, 1 problem)"
+note = "no Law-bearing value of this crate crosses a crate boundary as bytes: everything the crate puts on the wire is ciphertext, keys, certificates and framing, and every public function carrying bytes is in scripts/law_boundary_table.toml with its class. CHANNEL_SEMANTICS_ID is a constant returned in the same process."
+reference_repo = "ALICE-Crypto"
+
+[G8]
+status = "n/a"
+evidence = [
+    "scripts/law_boundary_scan.py with scripts/law_boundary_table.toml and scripts/test_law_boundary_scan.py, run by the ci.yml clippy job (see G7)",
+]
+mutant = "measured 2026-10-25, reverted: a `pub fn law_bytes() -> [u8; 8]` in src/semantics.rs makes the scan exit 1 (an unlisted byte boundary)"
+note = "the crate writes no durable form of a Law-bearing value: it holds no file, store or cache, and its outputs are messages and packets handed to the caller; measured by the same scan as G7."
+reference_repo = "ALICE-Crypto"
+
+[G9]
+status = "n/a"
+evidence = [
+    "scripts/law_boundary_scan.py (see G7 / G8)",
+    "scripts/id_move_check.py (shared with the other ALICE crates; tests scripts/test_id_move_check.py; config scripts/id_move.toml): watches CHANNEL_SEMANTICS_ID even though nothing persists it; every [u8; 32] const / static / associated const must be listed or exempt (PROTOCOL_NAME is exempt: the Noise protocol name, not a Law identifier); the crate has no release, so it compares 1 identifier against no base today; ci.yml clippy job and scripts/preflight.sh",
+]
+mutant = "G9 applies only when G8 does; measured on G8's scan 2026-10-25, reverted: a `pub fn law_bytes() -> [u8; 8]` in src/semantics.rs makes the scan exit 1"
+note = "follows G8: the crate persists no Law-bearing value, so there is no persisted identifier whose history could move. CHANNEL_SEMANTICS_ID (G6) is introduced at this commit."
+reference_repo = "ALICE-Crypto"
+
+[G10]
+status = "pass"
+evidence = [
+    "tests/semantics_golden.rs: every Law-tested output is produced from fixed keys (`tests/semantics_golden.rs#Keypair::from_secret([fill; 32])`, with the fixed ephemeral constructors HandshakeState::initiator_with_ephemeral / responder_with_ephemeral), pinned by digest on every CI leg",
+    "clippy.toml disallowed-methods `clippy.toml#path = \"getrandom::getrandom\"`, `clippy.toml#path = \"getrandom::getrandom_uninit\"`, `clippy.toml#path = \"std::time::Instant::now\"`, `clippy.toml#path = \"std::time::Instant::elapsed\"`, `clippy.toml#path = \"std::time::SystemTime::elapsed\"`, `clippy.toml#path = \"std::time::SystemTime::now\"`, `clippy.toml#path = \"std::collections::hash_map::RandomState::new\"` and disallowed-types `clippy.toml#path = \"std::collections::hash_map::RandomState\"`, linted with -D warnings by the clippy steps listed under G1",
+    "scripts/clippy_canary.py plants every one of those entries (rows `scripts/clippy_canary_calls.tsv#let _ = getrandom::getrandom;` and the rest) and fails unless clippy flags each",
+    "scripts/clippy_external_coverage.py (tests scripts/test_clippy_external_coverage.py): every public function of each external module clippy.toml names (getrandom, the locked version) is banned or allowed with a reason; both getrandom functions are banned, so no allow file exists; `.github/workflows/ci.yml#- name: Clippy external coverage (every public function of a named module is banned or allowed)`",
+    "src/clock.rs: the only two clock reads of the crate (`src/clock.rs#pub fn now() -> std::time::Instant` and `src/clock.rs#pub fn system_now() -> std::time::SystemTime`), each under a scoped #[expect] with its reason",
+]
+mutant = "measured 2026-10-25, reverted: removing the scoped #[expect] above `src/clock.rs#pub fn now() -> std::time::Instant` makes the all-targets clippy step fail with `use of a disallowed method std::time::Instant::now`; deleting the f64::exp entry from clippy.toml makes scripts/clippy_canary.py exit 1 (the canary covers the G10 entries the same way)"
+since = ""
+note = "Law-bearing output is what the channel puts on the wire for given keys, reproduced from caller-supplied keys. Premise: generating secret material is not Law output. Keypair::generate (`src/noise.rs#pub fn generate() -> Result<Self, NoiseError>`) draws a fresh ephemeral key through alice-crypto's random::fill; it must be unpredictable, and the goldens replace it with a fixed key. The two clock reads label a datagram initiation with TAI64N so a responder can refuse an older one, and bound the stream handshake's reads with a deadline; neither enters a key, a transcript or any output two peers must agree on bit for bit."
+reference_repo = "ALICE-DB"
+
+[G11]
+status = "fail-known"
+since = ""
+note = "(c) holds: scripts/shared_files.sh fetches ALICE-Law's table and checker at .github/shared-files-pin (both SHA-256 pinned) and compares every shared copy of the committed tree (`.github/workflows/ci.yml#- name: Shared files equal ALICE-Law's table`); every copy this crate carries has its row's bytes. Located absence for (a) and (b): there is no conformance/g11.toml and no CI step that checks one. ALICE-Law's generator takes the rows of shared checkers only for the repositories its shared-files table lists as carriers, and the table lists this crate once its main holds the copies; the table and its check come with that listing."
+reference_repo = "ALICE-Sync"
+
+[G12]
+status = "pass"
+evidence = [
+    ".github/workflows/public-text.yml (pushes to main and ci/**, pull requests to main)",
+    "scripts/public_text.sh (fetches ALICE-Law's scripts/public_text_check.py at the pinned revision, refuses it unless the SHA-256 matches, exits 2 when it compared nothing)",
+    ".github/public-text-pin",
+    "scripts/test_public_text.py",
+    "scripts/preflight.sh (`scripts/preflight.sh#step \"eol.yml / public-text.yml: Line endings and public text\"`)",
+]
+mutant = "measured 2026-10-25: before this commit the checker reported a doc line of src/datagram.rs as a finding of its `agent process` class (`public text: 1 findings in 19 files at HEAD`, exit 1); the line was reworded and the same run reports 0 findings"
+since = ""
+reference_repo = "ALICE-DB"
+
+[G13]
+status = "pass"
+evidence = [
+    "clippy.toml `clippy.toml#path = \"std::collections::HashMap\"` and `clippy.toml#path = \"std::collections::HashSet\"`: disallowed-types HashMap and HashSet (with RandomState banned for G10), so no hash iteration order can reach an output; the canary plants each",
+    "src/ has no HashMap, HashSet, rayon, std::thread or par_iter; the tests that used a HashMap use a BTreeMap",
+    "scripts/clippy_canary.py (tests scripts/test_clippy_canary.py, rows scripts/clippy_canary_calls.tsv generated from clippy.toml): plants each disallowed entry, the HashMap and HashSet rows among them, and fails when clippy does not flag one",
+]
+mutant = "measured 2026-10-25, reverted: appending `pub fn g13_mutant() -> usize { std::collections::HashMap::<u8, u8>::new().len() }` to src/lib.rs makes the all-targets clippy step exit 101 with `use of a disallowed type std::collections::HashMap`; the canary plants 68 entries and flags every one"
+since = ""
+note = "the order-independence test the gate names has nothing to vary here: the crate's outputs are produced by one caller-driven state machine with no hash container and no thread of its own; the ban keeps it so (a BTreeMap / BTreeSet is the allowed form)."
+reference_repo = "ALICE-DB"
+
+[G14]
+status = "pass"
+evidence = [
+    "scripts/build_config_guard.py, static half (byte-identical to ALICE-DB's): every .cargo/config*, *.toml, build.rs, *.rs, *.yml / *.yaml, *.json and script kind outside target/, for target-cpu=native, non-literal target flags, RUSTFLAGS from a command or a file, fast-math-style flags and the fast float intrinsics",
+    "scripts/build_flags_check.py, dynamic half (byte-identical to ALICE-DB's: runs cargo check -v in a fresh target directory and reads every rustc command line; fails when no command line, or none for alice_channel, was seen)",
+    "scripts/build_config_allowlist.toml (five excludes with reasons: the two G14 scripts, their tests, this manifest; no allow entry)",
+    "scripts/test_build_config_guard.py, scripts/test_build_flags_check.py, scripts/run_tests.sh and scripts/test_run_tests.py",
+    ".github/workflows/ci.yml float-environment job (ubuntu, macOS, Windows): tests/float_environment.rs in debug and release through scripts/run_tests.sh float_environment=2, the static guard and the test files; on ubuntu and macOS the dynamic check for the default and async feature sets in the release profile",
+    "tests/float_environment.rs round_to_nearest_even and subnormals_are_not_flushed (byte-identical to ALICE-DB's)",
+]
+mutant = "measured 2026-10-25, each reverted: adding `RUSTFLAGS: \"-C target-cpu=native\"` to ci.yml's env makes scripts/build_config_guard.py exit 1 (2 problems); RUSTFLAGS=$'-C target-cpu=nat\\x69ve' makes scripts/build_flags_check.py exit 1 (target-cpu-native on the rustc command lines, alice_channel among them)"
+since = ""
+note = "the static scan covers the files of this repository and the dynamic check covers the builds CI runs on ubuntu and macOS; a flag passed by a build outside this repository (a consumer's own RUSTFLAGS) is outside both. The crate computes no floating-point value; the float environment test pins the platform the dependencies run on."
+reference_repo = "ALICE-DB"
