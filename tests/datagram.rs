@@ -8,8 +8,8 @@
 use std::collections::HashMap;
 
 use alice_channel::datagram::{
-    Confirmed, DatagramChannel, DatagramError, Initiator, Pending, Responder, KIND_DATA,
-    REPLAY_WINDOW,
+    Confirmed, DatagramChannel, DatagramError, InitTimestamp, Initiator, Pending, Responder,
+    DATAGRAM_AD, KIND_DATA, REPLAY_WINDOW,
 };
 use alice_channel::noise::Keypair;
 use alice_channel::{ChannelError, Credential, PeerPolicy};
@@ -85,7 +85,7 @@ fn cert(p: &Party) -> DeviceCert {
 fn connected(a: &Party, b: &Party) -> (DatagramChannel, DatagramChannel) {
     let policy = Policy::knowing(&[a, b]);
     let (init, first) = Initiator::start(&a.cred, &policy, &cert(b)).unwrap();
-    let pending = Responder::respond(&b.cred, &policy, &first).unwrap();
+    let pending = Responder::new().respond(&b.cred, &policy, &first).unwrap();
     let (ca, confirm) = init.finish(pending.response(), &policy).unwrap();
     let (cb, payload) = pending.confirm(&confirm).channel().unwrap();
     assert_eq!(payload, None, "the key confirmation carries no payload");
@@ -212,7 +212,7 @@ fn a_repeated_first_packet_gets_the_same_response_not_a_new_handshake() {
         &first[..],
         "the initiator repeats the same bytes"
     );
-    let pending = Responder::respond(&b.cred, &policy, &first).unwrap();
+    let pending = Responder::new().respond(&b.cred, &policy, &first).unwrap();
     assert!(pending.is_first(&first));
     assert!(!pending.is_first(&[first.clone(), vec![0]].concat()));
     let response = pending.response().to_vec();
@@ -227,7 +227,7 @@ fn a_lost_confirmation_is_replaced_by_the_first_data_packet() {
     let (a, b) = (party(1, "a"), party(2, "b"));
     let policy = Policy::knowing(&[&a, &b]);
     let (init, first) = Initiator::start(&a.cred, &policy, &cert(&b)).unwrap();
-    let pending = Responder::respond(&b.cred, &policy, &first).unwrap();
+    let pending = Responder::new().respond(&b.cred, &policy, &first).unwrap();
     let (mut ca, _lost) = init.finish(pending.response(), &policy).unwrap();
     let data = ca.seal(b"first message").unwrap();
     let (_cb, payload) = pending.confirm(&data).channel().unwrap();
@@ -239,7 +239,7 @@ fn a_repeated_response_after_the_handshake_gets_a_fresh_confirmation() {
     let (a, b) = (party(1, "a"), party(2, "b"));
     let policy = Policy::knowing(&[&a, &b]);
     let (init, first) = Initiator::start(&a.cred, &policy, &cert(&b)).unwrap();
-    let pending = Responder::respond(&b.cred, &policy, &first).unwrap();
+    let pending = Responder::new().respond(&b.cred, &policy, &first).unwrap();
     let response = pending.response().to_vec();
     let (mut ca, lost) = init.finish(&response, &policy).unwrap();
     let again = ca
@@ -257,7 +257,7 @@ fn a_stray_packet_leaves_the_pending_responder_waiting() {
     let (a, b) = (party(1, "a"), party(2, "b"));
     let policy = Policy::knowing(&[&a, &b]);
     let (init, first) = Initiator::start(&a.cred, &policy, &cert(&b)).unwrap();
-    let pending = Responder::respond(&b.cred, &policy, &first).unwrap();
+    let pending = Responder::new().respond(&b.cred, &policy, &first).unwrap();
     let (_, confirm) = init.finish(pending.response(), &policy).unwrap();
     let mut stray = confirm.clone();
     *stray.last_mut().unwrap() ^= 1;
@@ -276,7 +276,7 @@ fn an_unknown_initiator_gets_no_response() {
     let both = Policy::knowing(&[&a, &b]);
     let (_, first) = Initiator::start(&a.cred, &both, &cert(&b)).unwrap();
     assert!(matches!(
-        Responder::respond(&b.cred, &knows_b_only, &first),
+        Responder::new().respond(&b.cred, &knows_b_only, &first),
         Err(ChannelError::UnknownPeer)
     ));
 }
@@ -287,7 +287,7 @@ fn a_first_packet_for_another_device_does_not_open() {
     let policy = Policy::knowing(&[&a, &b, &c]);
     let (_, first) = Initiator::start(&a.cred, &policy, &cert(&b)).unwrap();
     assert!(matches!(
-        Responder::respond(&c.cred, &policy, &first),
+        Responder::new().respond(&c.cred, &policy, &first),
         Err(ChannelError::Noise(_))
     ));
 }
@@ -350,9 +350,124 @@ fn a_packet_of_the_wrong_kind_does_not_start_or_finish_a_handshake() {
     let (init, first) = Initiator::start(&a.cred, &policy, &cert(&b)).unwrap();
     let mut as_data = first.clone();
     as_data[0] = KIND_DATA;
-    assert!(Responder::respond(&b.cred, &policy, &as_data).is_err());
-    let pending = Responder::respond(&b.cred, &policy, &first).unwrap();
+    assert!(Responder::new()
+        .respond(&b.cred, &policy, &as_data)
+        .is_err());
+    let pending = Responder::new().respond(&b.cred, &policy, &first).unwrap();
     let mut as_init = pending.response().to_vec();
     as_init[0] = first[0];
     assert!(init.finish(&as_init, &policy).is_err());
 }
+
+#[test]
+fn a_replayed_init_is_refused_and_a_later_one_is_answered() {
+    let (a, b) = (party(1, "a"), party(2, "b"));
+    let policy = Policy::knowing(&[&a, &b]);
+    let mut responder = Responder::new();
+    let t = InitTimestamp::from_unix(1_800_000_000, 5);
+    let (_, first) = Initiator::start_at(&a.cred, &policy, &cert(&b), t).unwrap();
+    responder.respond(&b.cred, &policy, &first).unwrap();
+    // the same init again, or one made earlier, starts nothing
+    assert!(matches!(
+        responder.respond(&b.cred, &policy, &first),
+        Err(ChannelError::StaleInit)
+    ));
+    let earlier = InitTimestamp::from_unix(1_800_000_000, 4);
+    let (_, old) = Initiator::start_at(&a.cred, &policy, &cert(&b), earlier).unwrap();
+    assert!(matches!(
+        responder.respond(&b.cred, &policy, &old),
+        Err(ChannelError::StaleInit)
+    ));
+    let (_, same_time) = Initiator::start_at(&a.cred, &policy, &cert(&b), t).unwrap();
+    assert!(matches!(
+        responder.respond(&b.cred, &policy, &same_time),
+        Err(ChannelError::StaleInit)
+    ));
+    // a later init is answered
+    let later = InitTimestamp::from_unix(1_800_000_000, 6);
+    let (init, fresh) = Initiator::start_at(&a.cred, &policy, &cert(&b), later).unwrap();
+    let pending = responder.respond(&b.cred, &policy, &fresh).unwrap();
+    let (_, confirm) = init.finish(pending.response(), &policy).unwrap();
+    pending.confirm(&confirm).channel().unwrap();
+}
+
+#[test]
+fn the_timestamps_of_two_initiators_are_kept_apart() {
+    let (a, b, c) = (party(1, "a"), party(2, "b"), party(3, "c"));
+    let policy = Policy::knowing(&[&a, &b, &c]);
+    let mut responder = Responder::new();
+    let t = InitTimestamp::from_unix(1_800_000_000, 0);
+    let (_, from_a) = Initiator::start_at(&a.cred, &policy, &cert(&b), t).unwrap();
+    let (_, from_c) = Initiator::start_at(&c.cred, &policy, &cert(&b), t).unwrap();
+    responder.respond(&b.cred, &policy, &from_a).unwrap();
+    responder.respond(&b.cred, &policy, &from_c).unwrap();
+}
+
+#[test]
+fn timestamps_order_by_seconds_then_nanoseconds() {
+    let t = |s, n| InitTimestamp::from_unix(s, n);
+    assert!(t(1, 999_999_999) < t(2, 0));
+    assert!(t(2, 0) < t(2, 1));
+    assert_eq!(t(0, 0).0, [0x40, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+    assert_eq!(t(1, 2_000_000_000), t(1, 999_999_999));
+}
+
+#[test]
+fn every_packet_of_a_long_run_has_its_own_ciphertext() {
+    let (a, b) = (party(1, "a"), party(2, "b"));
+    let (mut ca, _) = connected(&a, &b);
+    let mut seen = std::collections::BTreeSet::new();
+    for _ in 0..600 {
+        let p = ca.seal(b"the same payload").unwrap();
+        assert!(
+            seen.insert(p[9..].to_vec()),
+            "a ciphertext came twice (a nonce was reused)"
+        );
+    }
+}
+
+/// The handshake and the first data packets with fixed ephemeral keys and timestamp, byte for byte: the
+/// packet layout, the counter as the nonce and the associated data are all in these bytes
+#[test]
+fn a_fixed_handshake_gives_fixed_packets() {
+    let (a, b) = (party(1, "a"), party(2, "b"));
+    let policy = Policy::knowing(&[&a, &b]);
+    let at = InitTimestamp::from_unix(1_800_000_000, 123);
+    let (init, first) = Initiator::start_with_ephemeral(
+        &a.cred,
+        &policy,
+        &cert(&b),
+        at,
+        Keypair::from_secret([41; 32]),
+    )
+    .unwrap();
+    let pending = Responder::new()
+        .respond_with_ephemeral(&b.cred, &policy, &first, Keypair::from_secret([42; 32]))
+        .unwrap();
+    let (mut ca, confirm) = init.finish(pending.response(), &policy).unwrap();
+    let data = ca.seal(b"datagram").unwrap();
+    let hex = |b: &[u8]| b.iter().map(|x| format!("{x:02x}")).collect::<String>();
+    let digest = |b: &[u8]| hex(&alice_crypto::sha256::digest(b));
+    assert_eq!(DATAGRAM_AD, b"alice-channel/datagram/v1");
+    assert_eq!(confirm.len(), 1 + 8 + 16);
+    assert_eq!(&confirm[..9], &[KIND_DATA, 0, 0, 0, 0, 0, 0, 0, 0]);
+    assert_eq!(&data[..9], &[KIND_DATA, 1, 0, 0, 0, 0, 0, 0, 0]);
+    let got = [
+        digest(&first),
+        digest(pending.response()),
+        hex(&confirm),
+        hex(&data),
+    ];
+    assert_eq!(got, GOLDEN);
+    pending.confirm(&confirm).channel().unwrap();
+}
+
+/// Recorded from this implementation (2026-10-25): the SHA-256 of the init and the response, and the
+/// confirmation and first data packet in full. A change to the layout, the nonce or the associated data
+/// changes them
+const GOLDEN: [&str; 4] = [
+    "ab84378931721e64eb6d2c6b15771f5bc316637a590eb14a9676b43687a03f04",
+    "2d4235b476dbe04df52e5b9f3941bc6010f57ba28dad7f7475d93555bf750b3e",
+    "030000000000000000f17a11c0798cee7d0f7c0cb64bd4c539",
+    "030100000000000000a1d945b97d8e5e23b43a82c5742a4a64f865b2345ae446d2",
+];
