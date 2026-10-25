@@ -6,7 +6,7 @@ All notable changes to ALICE-Channel are documented here. While crates.io is fro
 
 ### Changed
 
-- CI (ALICE-Law): `alice-law-conformance.toml` を足した (G1-G6 / G10 / G12-G14 は pass、G7-G9 は n/a、G11 は fail-known) 共有の file (ALICE-Law 0a5de01 の表で ALICE-Crypto が持つ 81 行) を表の bytes で置き、`scripts/shared_files.sh` と `scripts/public_text.sh` が pin した revision の検査器で比べる
+- CI (ALICE-Law): `alice-law-conformance.toml` を足した (G1-G6 / G10 / G12-G14 は pass、G7-G9 は n/a、G11 は fail-known) 共有の file (ALICE-Law の表で ALICE-Crypto が持つ 81 行、pin は 0f545c2) を表の bytes で置き、`scripts/shared_files.sh` と `scripts/public_text.sh` が pin した revision の検査器で比べる
 - CI: test を debug / release x x86_64 / aarch64 にし、記録した bit の golden (`tests/semantics_golden.rs`)、識別子 (`tests/channel_semantics_id.rs`)、Noise の vector を `scripts/run_tests.sh` で件数つきで走らせる float-environment job (ubuntu / macOS / Windows)、clippy の canary と外部 module の網羅、Law 境界の走査、識別子の移動の検査、g3-ir / semver-checks / security-audit / eol / public-text の workflow を足した
 - clippy.toml: 浮動小数の超越関数と max / min / clamp、時計、OS 乱数、`HashMap` / `HashSet` / `RandomState` を禁止した 時計は `src/clock.rs` の 2 関数だけが読む
 - 試験の `HashMap` を `BTreeMap` にした
