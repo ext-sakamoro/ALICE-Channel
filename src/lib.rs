@@ -32,6 +32,7 @@
 
 #![warn(clippy::all, clippy::pedantic, clippy::nursery)]
 
+pub mod datagram;
 pub mod noise;
 
 #[cfg(feature = "async")]

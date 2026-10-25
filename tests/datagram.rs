@@ -8,7 +8,8 @@
 use std::collections::HashMap;
 
 use alice_channel::datagram::{
-    DatagramChannel, DatagramError, Initiator, Pending, Responder, KIND_DATA, REPLAY_WINDOW,
+    Confirmed, DatagramChannel, DatagramError, Initiator, Pending, Responder, KIND_DATA,
+    REPLAY_WINDOW,
 };
 use alice_channel::noise::Keypair;
 use alice_channel::{ChannelError, Credential, PeerPolicy};
@@ -86,7 +87,7 @@ fn connected(a: &Party, b: &Party) -> (DatagramChannel, DatagramChannel) {
     let (init, first) = Initiator::start(&a.cred, &policy, &cert(b)).unwrap();
     let pending = Responder::respond(&b.cred, &policy, &first).unwrap();
     let (ca, confirm) = init.finish(pending.response(), &policy).unwrap();
-    let (cb, payload) = pending.confirm(&confirm).map_err(|(_, e)| e).unwrap();
+    let (cb, payload) = pending.confirm(&confirm).channel().unwrap();
     assert_eq!(payload, None, "the key confirmation carries no payload");
     (ca, cb)
 }
@@ -112,12 +113,18 @@ fn packets_open_in_any_order_and_each_only_once() {
     for &i in &order {
         got.push(cb.open(&sent[i]).unwrap().expect("a data packet"));
     }
-    let mut want: Vec<Vec<u8>> = order.iter().map(|&i| vec![u8::try_from(i).unwrap(); 40]).collect();
+    let mut want: Vec<Vec<u8>> = order
+        .iter()
+        .map(|&i| vec![u8::try_from(i).unwrap(); 40])
+        .collect();
     want.sort();
     got.sort();
     assert_eq!(got, want);
     for p in &sent {
-        assert!(matches!(cb.open(p), Err(DatagramError::Replayed)), "a second copy opens");
+        assert!(
+            matches!(cb.open(p), Err(DatagramError::Replayed)),
+            "a second copy opens"
+        );
     }
 }
 
@@ -157,7 +164,11 @@ fn a_changed_packet_is_refused_and_does_not_move_the_window() {
     let mut bad = good.clone();
     *bad.last_mut().unwrap() ^= 1;
     assert!(matches!(cb.open(&bad), Err(DatagramError::Decrypt)));
-    assert_eq!(cb.open(&good).unwrap(), Some(b"hello".to_vec()), "the genuine packet still opens");
+    assert_eq!(
+        cb.open(&good).unwrap(),
+        Some(b"hello".to_vec()),
+        "the genuine packet still opens"
+    );
     // a forged counter far ahead does not advance the window either
     let mut far = ca.seal(b"later").unwrap();
     far[1..9].copy_from_slice(&(u64::MAX - 2).to_le_bytes());
@@ -177,7 +188,10 @@ fn a_packet_that_is_not_a_data_packet_is_refused() {
         p[0] = 9;
         p
     }] {
-        assert!(matches!(cb.open(&bad), Err(DatagramError::Malformed)), "{bad:?}");
+        assert!(
+            matches!(cb.open(&bad), Err(DatagramError::Malformed)),
+            "{bad:?}"
+        );
     }
 }
 
@@ -193,7 +207,11 @@ fn a_repeated_first_packet_gets_the_same_response_not_a_new_handshake() {
     let (a, b) = (party(1, "a"), party(2, "b"));
     let policy = Policy::knowing(&[&a, &b]);
     let (init, first) = Initiator::start(&a.cred, &policy, &cert(&b)).unwrap();
-    assert_eq!(init.first(), &first[..], "the initiator repeats the same bytes");
+    assert_eq!(
+        init.first(),
+        &first[..],
+        "the initiator repeats the same bytes"
+    );
     let pending = Responder::respond(&b.cred, &policy, &first).unwrap();
     assert!(pending.is_first(&first));
     assert!(!pending.is_first(&[first.clone(), vec![0]].concat()));
@@ -201,7 +219,7 @@ fn a_repeated_first_packet_gets_the_same_response_not_a_new_handshake() {
     // the responder answers the repeat with the bytes it already sent
     assert_eq!(pending.response(), &response[..]);
     let (_, confirm) = init.finish(&response, &policy).unwrap();
-    pending.confirm(&confirm).map_err(|(_, e)| e).unwrap();
+    pending.confirm(&confirm).channel().unwrap();
 }
 
 #[test]
@@ -212,7 +230,7 @@ fn a_lost_confirmation_is_replaced_by_the_first_data_packet() {
     let pending = Responder::respond(&b.cred, &policy, &first).unwrap();
     let (mut ca, _lost) = init.finish(pending.response(), &policy).unwrap();
     let data = ca.seal(b"first message").unwrap();
-    let (_cb, payload) = pending.confirm(&data).map_err(|(_, e)| e).unwrap();
+    let (_cb, payload) = pending.confirm(&data).channel().unwrap();
     assert_eq!(payload, Some(b"first message".to_vec()));
 }
 
@@ -230,7 +248,7 @@ fn a_repeated_response_after_the_handshake_gets_a_fresh_confirmation() {
         .unwrap();
     assert_ne!(again, lost, "a new counter");
     assert!(ca.answer_repeated_response(b"\x02other").is_none());
-    let (_cb, payload) = pending.confirm(&again).map_err(|(_, e)| e).unwrap();
+    let (_cb, payload) = pending.confirm(&again).channel().unwrap();
     assert_eq!(payload, None);
 }
 
@@ -244,10 +262,11 @@ fn a_stray_packet_leaves_the_pending_responder_waiting() {
     let mut stray = confirm.clone();
     *stray.last_mut().unwrap() ^= 1;
     let pending: Pending = match pending.confirm(&stray) {
-        Err((p, DatagramError::Decrypt)) => p,
-        other => panic!("{:?}", other.map(|_| ())),
+        Confirmed::Waiting(p, DatagramError::Decrypt) => p,
+        Confirmed::Waiting(_, e) => panic!("{e}"),
+        Confirmed::Open(..) => panic!("a changed packet opened"),
     };
-    pending.confirm(&confirm).map_err(|(_, e)| e).unwrap();
+    pending.confirm(&confirm).channel().unwrap();
 }
 
 #[test]
@@ -284,4 +303,56 @@ fn the_two_directions_are_independent() {
     // a packet sealed by a side does not open on that side
     let own = ca.seal(b"own").unwrap();
     assert!(matches!(ca.open(&own), Err(DatagramError::Decrypt)));
+}
+
+#[test]
+fn a_long_run_in_order_opens_past_the_window_size() {
+    let (a, b) = (party(1, "a"), party(2, "b"));
+    let (mut ca, mut cb) = connected(&a, &b);
+    let n = usize::try_from(REPLAY_WINDOW).unwrap() * 3 + 7;
+    for i in 0..n {
+        let p = ca.seal(&i.to_le_bytes()).unwrap();
+        assert_eq!(
+            cb.open(&p).unwrap(),
+            Some(i.to_le_bytes().to_vec()),
+            "packet {i}"
+        );
+    }
+}
+
+#[test]
+fn a_jump_ahead_forgets_the_counters_it_leaves_behind_and_only_those() {
+    let (a, b) = (party(1, "a"), party(2, "b"));
+    let (mut ca, mut cb) = connected(&a, &b);
+    let window = usize::try_from(REPLAY_WINDOW).unwrap();
+    // sent[i] carries counter i + 1
+    let sent: Vec<Vec<u8>> = (0..2 * window)
+        .map(|i| ca.seal(&i.to_le_bytes()).unwrap())
+        .collect();
+    for p in &sent[..window] {
+        cb.open(p).unwrap();
+    }
+    // jump by less than the window: counter 1.5 * window opens
+    cb.open(&sent[window + window / 2 - 1]).unwrap();
+    // a counter the jump passed over, in the window, whose slot an older counter used, opens once
+    let back = window + window / 4;
+    assert_eq!(
+        cb.open(&sent[back]).unwrap(),
+        Some(back.to_le_bytes().to_vec())
+    );
+    assert!(matches!(cb.open(&sent[back]), Err(DatagramError::Replayed)));
+}
+
+#[test]
+fn a_packet_of_the_wrong_kind_does_not_start_or_finish_a_handshake() {
+    let (a, b) = (party(1, "a"), party(2, "b"));
+    let policy = Policy::knowing(&[&a, &b]);
+    let (init, first) = Initiator::start(&a.cred, &policy, &cert(&b)).unwrap();
+    let mut as_data = first.clone();
+    as_data[0] = KIND_DATA;
+    assert!(Responder::respond(&b.cred, &policy, &as_data).is_err());
+    let pending = Responder::respond(&b.cred, &policy, &first).unwrap();
+    let mut as_init = pending.response().to_vec();
+    as_init[0] = first[0];
+    assert!(init.finish(&as_init, &policy).is_err());
 }

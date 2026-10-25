@@ -5,7 +5,7 @@ edition = "2021"
 rust-version = "1.88"
 license = "LicenseRef-Proprietary"
 publish = false
-description = "Mutually authenticated, encrypted channels between certified devices: the Noise XX handshake with each side's static key bound to its device certificate"
+description = "Mutually authenticated, encrypted channels between certified devices: the Noise IK handshake (over a stream, or in datagrams) with each side's static key bound to its device certificate"
 repository = "https://github.com/ext-sakamoro/ALICE-Channel"
 authors = ["Moroya Sakamoto"]
 

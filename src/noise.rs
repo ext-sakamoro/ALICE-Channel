@@ -128,6 +128,17 @@ fn hkdf2(ck: &[u8; 32], ikm: &[u8]) -> (Zeroizing<[u8; 32]>, Zeroizing<[u8; 32]>
     (out1, out2)
 }
 
+/// The 96-bit nonce of a counter: 32 zero bits, then the counter little-endian (section 5.1 for
+/// `ChaChaPoly`); 2^64 - 1 is reserved
+fn nonce_of(counter: u64) -> Result<[u8; 12], NoiseError> {
+    if counter == u64::MAX {
+        return Err(NoiseError::NonceExhausted);
+    }
+    let mut n = [0u8; 12];
+    n[4..].copy_from_slice(&counter.to_le_bytes());
+    Ok(n)
+}
+
 /// One direction's key and nonce counter (section 5.1)
 #[derive(Clone)]
 struct CipherState {
@@ -151,13 +162,19 @@ impl CipherState {
     }
 
     fn nonce_bytes(&self) -> Result<[u8; 12], NoiseError> {
-        // 2^64 - 1 is reserved (section 5.1)
-        if self.nonce == u64::MAX {
-            return Err(NoiseError::NonceExhausted);
-        }
-        let mut n = [0u8; 12];
-        n[4..].copy_from_slice(&self.nonce.to_le_bytes());
-        Ok(n)
+        nonce_of(self.nonce)
+    }
+
+    /// Seal under the explicit `counter` as the nonce (the datagram mode), without touching the counter
+    fn seal_at(&self, counter: u64, ad: &[u8], plaintext: &[u8]) -> Result<Vec<u8>, NoiseError> {
+        let key = self.key.as_ref().ok_or(NoiseError::NotFinished)?;
+        Ok(aead::seal(key, &nonce_of(counter)?, ad, plaintext))
+    }
+
+    /// Open under the explicit `counter` as the nonce (the datagram mode)
+    fn open_at(&self, counter: u64, ad: &[u8], ciphertext: &[u8]) -> Result<Vec<u8>, NoiseError> {
+        let key = self.key.as_ref().ok_or(NoiseError::NotFinished)?;
+        aead::open(key, &nonce_of(counter)?, ad, ciphertext).map_err(|_| NoiseError::Decrypt)
     }
 
     fn encrypt(&mut self, ad: &[u8], plaintext: &[u8]) -> Result<Vec<u8>, NoiseError> {
@@ -549,6 +566,62 @@ impl Transport {
     #[must_use]
     pub fn split(self) -> (TransportSender, TransportReceiver) {
         (self.sender, self.receiver)
+    }
+
+    /// Use the transport keys for datagrams: each message is sealed under an explicit counter instead of
+    /// the next implicit one, so messages can be opened out of order (the caller keeps the replay window).
+    /// The transport is consumed, so the same keys are never used in both modes
+    #[must_use]
+    pub fn into_datagram(self) -> DatagramTransport {
+        DatagramTransport {
+            next: self.sender.cipher.nonce,
+            send: self.sender.cipher,
+            recv: self.receiver.cipher,
+            handshake_hash: self.sender.handshake_hash,
+        }
+    }
+}
+
+/// The two transport ciphers for datagrams: an explicit counter per message as its nonce
+pub struct DatagramTransport {
+    send: CipherState,
+    recv: CipherState,
+    next: u64,
+    handshake_hash: [u8; 32],
+}
+
+impl DatagramTransport {
+    /// Seal `payload` under the next counter; returns that counter and the ciphertext
+    ///
+    /// # Errors
+    /// [`NoiseError::TooLong`] when the ciphertext would exceed [`MAX_MESSAGE`],
+    /// [`NoiseError::NonceExhausted`] once the counters are spent
+    pub fn seal(&mut self, ad: &[u8], payload: &[u8]) -> Result<(u64, Vec<u8>), NoiseError> {
+        if payload.len() + TAG_LEN > MAX_MESSAGE {
+            return Err(NoiseError::TooLong);
+        }
+        let counter = self.next;
+        let out = self.send.seal_at(counter, ad, payload)?;
+        self.next = counter + 1;
+        Ok((counter, out))
+    }
+
+    /// Open a ciphertext sealed under `counter` (any order; the caller refuses a counter it has opened)
+    ///
+    /// # Errors
+    /// [`NoiseError::Decrypt`], [`NoiseError::TooLong`], [`NoiseError::NonceExhausted`] for the
+    /// reserved counter
+    pub fn open(&self, counter: u64, ad: &[u8], ciphertext: &[u8]) -> Result<Vec<u8>, NoiseError> {
+        if ciphertext.len() > MAX_MESSAGE {
+            return Err(NoiseError::TooLong);
+        }
+        self.recv.open_at(counter, ad, ciphertext)
+    }
+
+    /// The handshake hash both sides share
+    #[must_use]
+    pub const fn handshake_hash(&self) -> [u8; 32] {
+        self.handshake_hash
     }
 }
 
