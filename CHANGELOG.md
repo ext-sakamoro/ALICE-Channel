@@ -11,6 +11,7 @@ All notable changes to ALICE-Channel are documented here. While crates.io is fro
 - clippy.toml: 浮動小数の超越関数と max / min / clamp、時計、OS 乱数、`HashMap` / `HashSet` / `RandomState` を禁止した 時計は `src/clock.rs` の 2 関数だけが読む
 - 試験の `HashMap` を `BTreeMap` にした
 - `.gitattributes`: text file を全 OS で LF で取り出す
+- alice-identity を 6cf9c0f にした (claims と schema の map を `BTreeMap` にした rev、この crate の使い方は変わらない)
 
 ### 破壊的変更
 
