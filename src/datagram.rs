@@ -15,8 +15,19 @@
 //! The handshake is the stream channel's Noise IK with the same signed payloads, so the same certificates
 //! and policy decide who gets a channel. The initiator's encrypted payload also carries a timestamp
 //! ([`InitTimestamp`], TAI64N): a [`Responder`] answers an init only when its timestamp is later than the
-//! last one it accepted from the same static key, so an old init replayed later starts nothing. Packets may be lost, so the initiator repeats its init packet
-//! ([`Initiator::first`]) until it has the response, and the responder answers a repeated init with the
+//! last one it accepted from the same static key, so an old init replayed later starts nothing.
+//!
+//! Two consequences follow from keeping only the last timestamp, in memory:
+//!
+//! - after the responder restarts it holds no timestamps, so the first replay of an old init is answered
+//!   once; that handshake cannot be confirmed (the replayer holds no static key) and an open channel is
+//!   not affected
+//! - an initiator whose clock steps back is refused ([`ChannelError::StaleInit`]) until its clock passes
+//!   the last time the responder accepted from it; the caller should report that refusal rather than
+//!   retry silently
+//!
+//! Packets may be lost, so the initiator repeats its init packet ([`Initiator::first`]) until it has the
+//! response, and the responder answers a repeated init with the
 //! response it already wrote ([`Pending::is_first`], [`Pending::response`]) rather than starting a second
 //! handshake. The responder's channel is returned by the first data packet that opens under the new keys
 //! ([`Pending::confirm`]): the initiator's empty key confirmation, or, when that was lost, any later data
