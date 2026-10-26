@@ -70,7 +70,7 @@ dependencies = [
 [[package]]
 name = "alice-identity"
 version = "1.2.0"
-source = "git+https://github.com/ext-sakamoro/ALICE-Identity?rev=6cf9c0ffb6e5539cada587cf4097aa335eae4744#6cf9c0ffb6e5539cada587cf4097aa335eae4744"
+source = "git+https://github.com/ext-sakamoro/ALICE-Identity?rev=55be13728aef680ff9b3de56dcd234a578ee7db9#55be13728aef680ff9b3de56dcd234a578ee7db9"
 dependencies = [
  "alice-sign",
 ]
@@ -78,7 +78,7 @@ dependencies = [
 [[package]]
 name = "alice-sign"
 version = "0.1.0"
-source = "git+https://github.com/ext-sakamoro/ALICE-Sign?rev=8a1b00d800082187a8693732a9ffb806c98814e7#8a1b00d800082187a8693732a9ffb806c98814e7"
+source = "git+https://github.com/ext-sakamoro/ALICE-Sign?rev=bb79209e376ec3989bf721f48d5894032a221e8b#bb79209e376ec3989bf721f48d5894032a221e8b"
 dependencies = [
  "ed25519-dalek",
  "sha2",
