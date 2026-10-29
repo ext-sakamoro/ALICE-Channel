@@ -12,7 +12,8 @@ and requires each one to be either banned or allowed with a reason.
 For each disallowed-methods entry whose first path segment is not a built-in
 root (std, core, alloc, the primitive types), the module is the path without
 its last segment. The crate is documented at the version locked in Cargo.lock
-(the highest one if several are locked) in a throwaway crate that copies
+(the highest one if several are locked), from the source Cargo.lock resolved it from (crates.io at that
+exact version, the locked commit of a git source, or the directory of a path source), in a throwaway crate that copies
 rust-toolchain.toml, with rustdoc's JSON output (unstable, enabled with
 RUSTC_BOOTSTRAP=1 on the pinned toolchain) and --document-hidden-items (a
 #[doc(hidden)] pub function is callable too); `pub use` re-exports, glob or
@@ -21,8 +22,9 @@ resolves for it in this workspace with every workspace feature on (`cargo
 metadata --all-features`), so a function behind a feature the real build
 enables is listed, and one behind a feature nothing enables is not.
 
-Not covered: associated functions of public types (methods such as
-`libm::Libm::<f64>::sin`); ban the type in disallowed-types for those. The JSON format_version must be one this script was written
+An entry whose parent is a public type (`alice_crypto::Key::generate`) names an associated function:
+its siblings are the public functions of the type's inherent impls (a trait impl's methods are the
+trait's, not the type's). The JSON format_version must be one this script was written
 against (SUPPORTED_FORMATS) or it stops and says so: a new toolchain is a
 reason to re-check the resolver, not to guess.
 
@@ -72,6 +74,10 @@ BUILTIN_ROOTS = frozenset(
     + [f"{s}{n}" for s in "iu" for n in (8, 16, 32, 64, 128)])
 # rustdoc JSON format versions the resolver below was checked against
 SUPPORTED_FORMATS = frozenset({60})
+# the item kinds whose inherent impls hold associated functions
+TYPE_KINDS = frozenset({"struct", "enum", "union"})
+# the crates.io index, as Cargo.lock names it (git and sparse protocols)
+CRATES_IO = frozenset({"registry+https://github.com/rust-lang/crates.io-index", "sparse+https://index.crates.io/"})
 
 
 def banned_external(clippy: dict) -> dict[tuple[str, ...], set[str]]:
@@ -148,9 +154,24 @@ def public_functions(doc: dict, module: tuple[str, ...]) -> set[str]:
             it = item(nxt) if nxt is not None else None
         return it
 
+    def inherent_functions(ty) -> set[str]:
+        """pub functions of the type's inherent impls"""
+        names = set()
+        for impl_id in ty["inner"][kind(ty)].get("impls", []):
+            imp = item(impl_id)
+            if imp is None or kind(imp) != "impl" or imp["inner"]["impl"].get("trait") is not None:
+                continue
+            for i in imp["inner"]["impl"].get("items", []):
+                it = item(i)
+                if it is not None and it.get("visibility") == "public" and kind(it) == "function":
+                    names.add(it["name"])
+        return names
+
     mod_id = doc["root"]
-    for seg in module[1:]:
+    for n, seg in enumerate(module[1:], start=2):
         sub = exports(mod_id, frozenset()).get(seg)
+        if sub is not None and kind(sub) in TYPE_KINDS and n == len(module):
+            return inherent_functions(sub)
         if sub is None or kind(sub) != "module":
             return set()
         mod_id = sub["id"]
@@ -173,6 +194,29 @@ def resolved_features(metadata: dict, crate: str, version: str) -> list[str]:
     return sorted(features)
 
 
+def dependency_source(metadata: dict, crate: str, version: str) -> dict[str, str]:
+    """The dependency entry that takes crate@version from where this workspace takes it: crates.io at
+    that exact version, the locked commit of a git source, or the directory of a path source."""
+    sources = {p.get("source") for p in metadata["packages"] if (p["name"], p["version"]) == (crate, version)}
+    paths = {str(Path(p["manifest_path"]).parent) for p in metadata["packages"]
+             if (p["name"], p["version"]) == (crate, version) and p.get("source") is None}
+    if not sources:
+        raise SystemExit(f"clippy_external_coverage: {crate} {version} is not in the workspace metadata")
+    if len(sources) > 1:
+        raise SystemExit(f"clippy_external_coverage: {crate} {version} comes from more than one source: "
+                         f"{sorted(str(x) for x in sources)}")
+    source = sources.pop()
+    if source is None:
+        return {"path": paths.pop()}
+    if source in CRATES_IO:
+        return {"version": f"={version}"}
+    if source.startswith("git+") and "#" in source:
+        url, commit = source[len("git+"):].split("#", 1)
+        return {"git": url.split("?", 1)[0], "rev": commit}
+    raise SystemExit(f"clippy_external_coverage: {crate} {version} comes from {source}, which this script "
+                     "cannot name as a dependency")
+
+
 def workspace_metadata() -> dict:
     proc = subprocess.run(["cargo", "metadata", "--format-version", "1", "--all-features", "--locked"],
                           cwd=ROOT, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
@@ -183,13 +227,15 @@ def workspace_metadata() -> dict:
     return json.loads(proc.stdout)
 
 
-def rustdoc_json(crate: str, version: str, features: list[str], workdir: Path) -> dict:
+def rustdoc_json(crate: str, version: str, features: list[str], workdir: Path,
+                 source: dict[str, str] | None = None) -> dict:
     (workdir / "src").mkdir(parents=True, exist_ok=True)
     (workdir / "src" / "lib.rs").write_text("", encoding="utf-8")
     feats = ", ".join(json.dumps(f) for f in features)
+    where = ", ".join(f"{k} = {json.dumps(v)}" for k, v in (source or {"version": f"={version}"}).items())
     (workdir / "Cargo.toml").write_text(
         f'[package]\nname = "clippy_external_coverage_probe"\nversion = "0.0.0"\nedition = "2021"\n\n'
-        f'[dependencies]\n{crate} = {{ version = "={version}", default-features = false, features = [{feats}] }}\n\n'
+        f'[dependencies]\n{crate} = {{ {where}, default-features = false, features = [{feats}] }}\n\n'
         f'[workspace]\n', encoding="utf-8")
     if TOOLCHAIN.exists():
         shutil.copy2(TOOLCHAIN, workdir / TOOLCHAIN.name)
@@ -260,7 +306,8 @@ def main() -> int:
                 continue
             if crate not in docs:
                 features = resolved_features(metadata, package, version)
-                docs[crate] = rustdoc_json(package, version, features, Path(tmp) / crate)
+                docs[crate] = rustdoc_json(package, version, features, Path(tmp) / crate,
+                                           dependency_source(metadata, package, version))
             public = public_functions(docs[crate], module)
             errors += compare(module, public, banned[module], allowed.get(module, {}))
             checked += len(public)

@@ -63,6 +63,110 @@ class PublicFunctions(unittest.TestCase):
         self.assertEqual(c.public_functions(cyc, ("k",)), {"f"})
 
 
+
+# a type with an inherent impl (pub generate, crate-private helper, pub const that is not a fn) and a trait
+# impl (clone): the type's associated functions are the inherent impl's pub fns
+TYPED = doc({
+    0: ("module", "krate", "public", {"items": [1, 2, 3, 9]}),
+    1: ("struct", "Key", "public", {"kind": {"plain": {"fields": []}}, "generics": {}, "impls": [4, 5]}),
+    2: ("enum", "Mode", "public", {"generics": {}, "variants": [], "impls": [8]}),
+    3: ("use", None, "public", {"name": "Alias", "id": 1, "is_glob": False}),
+    4: ("impl", None, "default", {"trait": None, "items": [6, 7, 10]}),
+    5: ("impl", None, "default", {"trait": {"path": "Clone", "id": 99}, "items": [11]}),
+    6: ("function", "generate", "public", {}),
+    7: ("function", "helper", "crate", {}),
+    8: ("impl", None, "default", {"trait": None, "items": [12]}),
+    9: ("module", "inner", "public", {"items": []}),
+    10: ("assoc_const", "LEN", "public", {}),
+    # public here so that only the trait-impl rule keeps it out (rustdoc marks trait impl items "default")
+    11: ("function", "clone", "public", {}),
+    12: ("function", "parse", "public", {}),
+})
+
+
+class AssociatedFunctions(unittest.TestCase):
+    """an entry Crate::Type::fn names an associated function: its siblings are the type's inherent pub fns"""
+
+    def test_a_struct_lists_its_inherent_pub_fns_only(self):
+        self.assertEqual(c.public_functions(TYPED, ("krate", "Key")), {"generate"})
+
+    def test_an_enum_lists_its_inherent_pub_fns(self):
+        self.assertEqual(c.public_functions(TYPED, ("krate", "Mode")), {"parse"})
+
+    def test_a_reexported_type_resolves_to_the_type(self):
+        self.assertEqual(c.public_functions(TYPED, ("krate", "Alias")), {"generate"})
+
+    def test_a_type_in_the_middle_of_the_path_is_not_a_module(self):
+        self.assertEqual(c.public_functions(TYPED, ("krate", "Key", "generate")), set())
+
+    def test_a_module_still_lists_its_free_functions(self):
+        self.assertEqual(c.public_functions(CRATE, ("krate", "nested")), {"deep"})
+
+
+class DependencySource(unittest.TestCase):
+    """the probe depends on the crate from the source Cargo.lock resolved, not always from crates.io"""
+
+    def meta(self, source, manifest="/r/vendor/alice-crypto/Cargo.toml"):
+        return {"packages": [{"id": "x", "name": "alice-crypto", "version": "0.6.0", "source": source,
+                              "manifest_path": manifest}]}
+
+    def test_a_registry_source_pins_the_exact_version(self):
+        spec = c.dependency_source(self.meta("registry+https://github.com/rust-lang/crates.io-index"),
+                                   "alice-crypto", "0.6.0")
+        self.assertEqual(spec, {"version": "=0.6.0"})
+
+    def test_the_sparse_crates_io_index_is_the_registry_too(self):
+        spec = c.dependency_source(self.meta("sparse+https://index.crates.io/"), "alice-crypto", "0.6.0")
+        self.assertEqual(spec, {"version": "=0.6.0"})
+
+    def test_a_git_source_takes_the_url_and_the_locked_commit(self):
+        sha = "4ab0f0e" + "0" * 33
+        spec = c.dependency_source(self.meta(f"git+https://github.com/ext-sakamoro/ALICE-Crypto?rev=4ab0f0e#{sha}"),
+                                   "alice-crypto", "0.6.0")
+        self.assertEqual(spec, {"git": "https://github.com/ext-sakamoro/ALICE-Crypto", "rev": sha})
+
+    def test_a_git_source_on_a_branch_still_takes_the_locked_commit(self):
+        sha = "a" * 40
+        spec = c.dependency_source(self.meta(f"git+https://example.invalid/r.git?branch=main#{sha}"),
+                                   "alice-crypto", "0.6.0")
+        self.assertEqual(spec, {"git": "https://example.invalid/r.git", "rev": sha})
+
+    def test_a_path_source_takes_the_manifest_directory(self):
+        spec = c.dependency_source(self.meta(None), "alice-crypto", "0.6.0")
+        self.assertEqual(spec, {"path": "/r/vendor/alice-crypto"})
+
+    def test_another_registry_stops(self):
+        with self.assertRaises(SystemExit):
+            c.dependency_source(self.meta("registry+https://example.invalid/index"), "alice-crypto", "0.6.0")
+
+    def test_one_version_from_two_sources_stops(self):
+        meta = self.meta("registry+https://github.com/rust-lang/crates.io-index")
+        meta["packages"].append(dict(meta["packages"][0], id="y", source=f"git+https://example.invalid/r.git#{'c' * 40}"))
+        with self.assertRaises(SystemExit):
+            c.dependency_source(meta, "alice-crypto", "0.6.0")
+
+    def test_a_package_not_in_the_metadata_stops(self):
+        with self.assertRaises(SystemExit):
+            c.dependency_source(self.meta(None), "alice-crypto", "9.9.9")
+
+    def test_the_probe_manifest_carries_the_source(self):
+        sha = "b" * 40
+        seen = {}
+
+        def fake_run(cmd, cwd, env, **_):
+            seen["toml"] = (Path(cwd) / "Cargo.toml").read_text(encoding="utf-8")
+            target = Path(cmd[cmd.index("--target-dir") + 1])
+            (target / "doc").mkdir(parents=True, exist_ok=True)
+            (target / "doc" / "alice_crypto.json").write_text("{}", encoding="utf-8")
+            return subprocess.CompletedProcess(cmd, 0, "", "")
+
+        with tempfile.TemporaryDirectory() as work, mock.patch.object(c.subprocess, "run", fake_run):
+            c.rustdoc_json("alice-crypto", "0.6.0", ["std"], Path(work),
+                           {"git": "https://github.com/ext-sakamoro/ALICE-Crypto", "rev": sha})
+        dep = c.tomllib.loads(seen["toml"])["dependencies"]["alice-crypto"]
+        self.assertEqual(dep, {"git": "https://github.com/ext-sakamoro/ALICE-Crypto", "rev": sha,
+                               "default-features": False, "features": ["std"]})
+
 class BanList(unittest.TestCase):
     def test_only_external_paths_are_kept(self):
         clippy = {"disallowed-methods": [
