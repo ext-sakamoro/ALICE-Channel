@@ -5,7 +5,7 @@ All notable changes to ALICE-Channel are documented here. While crates.io is fro
 ## [Unreleased]
 
 ### Changed
-- CI (ALICE-Law G9 / G11): 識別子の移動の検査器 (`scripts/id_move_check.py` と試験) を共有の新しい bytes にし、新しく足した associated const を受けるようにした 他の共有の file も ALICE-Law 7f5f4cbd の表が計画した bytes にし、shared-files と G11 の表の pin を上げた
+- CI (ALICE-Law G9 / G11): 識別子の移動の検査器 (`scripts/id_move_check.py` と試験) を共有の新しい bytes にし、新しく足した associated const を受けるようにした 他の共有の file も ALICE-Law 40973a8a の表が計画した bytes にし、shared-files と G11 の表の pin を上げた
 
 - 依存: alice-identity の pin を 6cf9c0ff から 55be1372 (credential の署名と選択開示を alice-sign の `cred` に任せた版)、alice-sign の pin を 8a1b00d8 から bb79209e に上げ、依存の木の alice-sign を 1 版にした この crate の挙動の変更なし
 - CI (ALICE-Law G11): `conformance/g11.toml` (ALICE-Law の `scripts/g11_table_gen.py` が `conformance/g11-own.toml` と共有の行から生成、14 行) を足し、`.github/g11-table-pin` の revision で ALICE-Law の検査器を取る `scripts/g11_table.sh` を CI の float-environment job と preflight で回す manifest の G11 を pass にした shared-files の pin を ALICE-Law 0e8c14e (この crate を写しの持ち主に載せた表) にし、`scripts/id_move_check.py` と試験をその表の計画の bytes (ALICE-Physics が owner) にした

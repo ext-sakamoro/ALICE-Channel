@@ -283,7 +283,7 @@ python3 scripts/test_clippy_external_coverage.py
 python3 scripts/clippy_external_coverage.py
 
 step "ci.yml / clippy: Identifier moves (tests, then against the release)"
-python3 scripts/test_id_move_check.py
+CARGO_TERM_COLOR=always python3 scripts/test_id_move_check.py
 python3 scripts/id_move_check.py
 
 step "ci.yml / doc: Doc"
