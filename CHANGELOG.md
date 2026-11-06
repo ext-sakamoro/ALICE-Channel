@@ -5,6 +5,7 @@ All notable changes to ALICE-Channel are documented here. While crates.io is fro
 ## [Unreleased]
 
 ### Changed
+- `alice-crypto` を main の `ed065ad` に上げる (SHA-256 の逐次計算の追加と CI の変更のみ、wire の bytes と識別子は変わらない)
 - CI (ALICE-Law G9 / G11): 識別子の移動の検査器 (`scripts/id_move_check.py` と試験) を共有の新しい bytes にし、新しく足した associated const を受けるようにした 他の共有の file も ALICE-Law 40973a8a の表が計画した bytes にし、shared-files と G11 の表の pin を上げた
 
 - 依存: alice-identity の pin を 6cf9c0ff から 55be1372 (credential の署名と選択開示を alice-sign の `cred` に任せた版)、alice-sign の pin を 8a1b00d8 から bb79209e に上げ、依存の木の alice-sign を 1 版にした この crate の挙動の変更なし
