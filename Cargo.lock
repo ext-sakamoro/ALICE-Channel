@@ -52,7 +52,7 @@ dependencies = [
 [[package]]
 name = "alice-crypto"
 version = "0.6.0"
-source = "git+https://github.com/ext-sakamoro/ALICE-Crypto?rev=ed065ad1d8145384e8d4d1458d35df7f220cb52c#ed065ad1d8145384e8d4d1458d35df7f220cb52c"
+source = "git+https://github.com/ext-sakamoro/ALICE-Crypto?branch=main#ed065ad1d8145384e8d4d1458d35df7f220cb52c"
 dependencies = [
  "aes-gcm",
  "argon2",
@@ -70,7 +70,7 @@ dependencies = [
 [[package]]
 name = "alice-identity"
 version = "1.2.0"
-source = "git+https://github.com/ext-sakamoro/ALICE-Identity?rev=55be13728aef680ff9b3de56dcd234a578ee7db9#55be13728aef680ff9b3de56dcd234a578ee7db9"
+source = "git+https://github.com/ext-sakamoro/ALICE-Identity?branch=main#f09fc22cf1c0f6eb2ee5172c0b91be0e4b2b0b23"
 dependencies = [
  "alice-sign",
 ]
@@ -78,7 +78,7 @@ dependencies = [
 [[package]]
 name = "alice-sign"
 version = "0.1.0"
-source = "git+https://github.com/ext-sakamoro/ALICE-Sign?rev=bb79209e376ec3989bf721f48d5894032a221e8b#bb79209e376ec3989bf721f48d5894032a221e8b"
+source = "git+https://github.com/ext-sakamoro/ALICE-Sign?branch=main#8c8d1eebf4ef9fc4059dae08779f8846e832df5e"
 dependencies = [
  "ed25519-dalek",
  "sha2",
