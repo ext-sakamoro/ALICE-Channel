@@ -10,7 +10,7 @@ repository = "https://github.com/ext-sakamoro/ALICE-Channel"
 authors = ["Moroya Sakamoto"]
 
 [dependencies]
-# X25519, SHA-256 / HMAC / HKDF and ChaCha20-Poly1305 (RFC 8439); the device certificate and the signer: taken by git from main like the other consumers, so a build that also takes ALICE-MLS or ALICE-Mailbox links one copy of each (the lock is the pin)
+# X25519, SHA-256 / HMAC / HKDF and ChaCha20-Poly1305 (RFC 8439); the device certificate and the signer: taken by git from main like the other consumers, so a build with downstream consumers links one copy of each (the lock is the pin)
 alice-crypto = { version = "0.6.0", git = "https://github.com/ext-sakamoro/ALICE-Crypto", branch = "main" }
 alice-identity = { version = "1.2.0", git = "https://github.com/ext-sakamoro/ALICE-Identity", branch = "main" }
 alice-sign = { version = "0.1", git = "https://github.com/ext-sakamoro/ALICE-Sign", branch = "main" }
