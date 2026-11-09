@@ -40,7 +40,6 @@ fn party(seed: u8, name: &str) -> Party {
         noise_static.public(),
         ISSUED_AT,
         NOT_AFTER,
-        [seed; 16],
     )
     .unwrap();
     Party {
@@ -463,11 +462,13 @@ fn a_fixed_handshake_gives_fixed_packets() {
 }
 
 /// Recorded from this implementation (2026-10-25): the SHA-256 of the init and the response, and the
-/// confirmation and first data packet in full. A change to the layout, the nonce or the associated data
+/// confirmation and first data packet in full. The init and the response carry the device certificates,
+/// so their digests were recorded again (2026-11-09) for alice-identity 2.0 (certificate version 3, the
+/// device id derived from the subject and the key); the confirmation and the data packet did not move. A change to the layout, the nonce or the associated data
 /// changes them
 const GOLDEN: [&str; 4] = [
-    "ab84378931721e64eb6d2c6b15771f5bc316637a590eb14a9676b43687a03f04",
-    "2d4235b476dbe04df52e5b9f3941bc6010f57ba28dad7f7475d93555bf750b3e",
+    "051d650ee3a9a421382e4b52d73d65eacb9872c68a1ee1a63818e41e065b2b70",
+    "b34769c1dbdc764af26e47aec49a2e447a62cf28892ad4f33ec27325b33f6f73",
     "030000000000000000f17a11c0798cee7d0f7c0cb64bd4c539",
     "030100000000000000a1d945b97d8e5e23b43a82c5742a4a64f865b2345ae446d2",
 ];

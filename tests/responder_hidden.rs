@@ -39,7 +39,6 @@ fn party(seed: u8, name: &str) -> Party {
         noise.public(),
         ISSUED_AT,
         NOT_AFTER,
-        [seed; 16],
     )
     .unwrap();
     Party {

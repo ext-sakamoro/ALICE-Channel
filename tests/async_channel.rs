@@ -42,7 +42,6 @@ fn device(seed: u8, name: &str) -> Device {
         noise.public(),
         1_800_000_000,
         1_800_086_400,
-        [seed; 16],
     )
     .unwrap();
     let cred = Credential::new(key, cert, noise).unwrap();

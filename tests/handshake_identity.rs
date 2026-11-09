@@ -33,7 +33,7 @@ struct Party {
     cred: Credential,
 }
 
-fn party(seed: u8, name: &str, cert_id: [u8; 16]) -> Party {
+fn party(seed: u8, name: &str) -> Party {
     let master = KeyPair::from_seed([seed; 32]);
     let device = KeyPair::from_seed([seed.wrapping_add(100); 32]);
     let did = Did::parse(&format!("did:alice:{name}")).unwrap();
@@ -45,7 +45,6 @@ fn party(seed: u8, name: &str, cert_id: [u8; 16]) -> Party {
         noise_static.public(),
         ISSUED_AT,
         NOT_AFTER,
-        cert_id,
     )
     .unwrap();
     Party {
@@ -132,8 +131,8 @@ fn the_constants_are_the_documented_ones() {
 
 #[test]
 fn two_certified_devices_connect_and_exchange_messages() {
-    let a = party(1, "alice", [1; 16]);
-    let b = party(2, "bob", [2; 16]);
+    let a = party(1, "alice");
+    let b = party(2, "bob");
     let policy_b = Policy::knowing(&[&a]);
     let policy_a = Policy::knowing(&[&b]);
     let b_cert = b.cred.cert().clone();
@@ -172,8 +171,8 @@ fn refused(
 
 #[test]
 fn a_device_whose_master_is_unknown_is_refused_in_the_handshake() {
-    let a = party(1, "alice", [1; 16]);
-    let b = party(2, "bob", [2; 16]);
+    let a = party(1, "alice");
+    let b = party(2, "bob");
     let policy_a = Policy::knowing(&[&b]);
     // bob knows nobody
     let (server, client) = refused(&a, b, &policy_a, Policy::knowing(&[]));
@@ -190,12 +189,12 @@ fn a_device_whose_master_is_unknown_is_refused_in_the_handshake() {
 
 #[test]
 fn a_revoked_device_is_refused_in_the_handshake() {
-    let a = party(1, "alice", [1; 16]);
-    let b = party(2, "bob", [2; 16]);
+    let a = party(1, "alice");
+    let b = party(2, "bob");
     let mut policy_b = Policy::knowing(&[&a]);
     let mut list = CertRevocations::new();
     list.accept(
-        RevocationList::issue(&a.master, 1, ISSUED_AT, &[[1; 16]]),
+        RevocationList::issue(&a.master, 1, ISSUED_AT, &[a.cred.cert().device_id()]),
         &a.master.public(),
     )
     .unwrap();
@@ -225,8 +224,8 @@ where
 
 #[test]
 fn an_expired_certificate_is_refused_before_dialling() {
-    let a = party(1, "alice", [1; 16]);
-    let b = party(2, "bob", [2; 16]);
+    let a = party(1, "alice");
+    let b = party(2, "bob");
     let policy_b = Policy::knowing(&[&a]);
     let mut policy_a = Policy::knowing(&[&b]);
     policy_a.now = NOT_AFTER; // the client judges bob's certificate at its expiry
@@ -251,8 +250,8 @@ fn an_expired_certificate_is_refused_before_dialling() {
 
 #[test]
 fn dialling_a_certificate_the_policy_does_not_know_writes_nothing() {
-    let a = party(1, "alice", [1; 16]);
-    let b = party(2, "bob", [2; 16]);
+    let a = party(1, "alice");
+    let b = party(2, "bob");
     let policy_b = Policy::knowing(&[&a]);
     let b_cert = b.cred.cert().clone();
     let nobody = Policy::knowing(&[]);
@@ -271,8 +270,8 @@ fn dialling_a_certificate_the_policy_does_not_know_writes_nothing() {
 fn dialling_a_certificate_for_another_static_key_does_not_open() {
     // bob's master certifies bob for a static key bob does not hold: the first message is made for that
     // key, does not open at bob, and bob writes nothing
-    let a = party(1, "alice", [1; 16]);
-    let b = party(2, "bob", [2; 16]);
+    let a = party(1, "alice");
+    let b = party(2, "bob");
     let not_bobs = DeviceCert::issue(
         &b.master,
         &b.did,
@@ -280,7 +279,6 @@ fn dialling_a_certificate_for_another_static_key_does_not_open() {
         Keypair::from_secret([0x99; 32]).public(),
         ISSUED_AT,
         NOT_AFTER,
-        [7; 16],
     )
     .unwrap();
     let policy_a = Policy::knowing(&[&b]);
@@ -304,8 +302,8 @@ fn dialling_a_certificate_for_another_static_key_does_not_open() {
 fn a_responder_proving_another_subject_than_the_one_dialled_is_refused() {
     // bob's master also certifies bob's static key under a second subject; alice dials that one, and bob
     // proves his own: the handshake completes cryptographically, connect refuses the subject
-    let a = party(1, "alice", [1; 16]);
-    let b = party(2, "bob", [2; 16]);
+    let a = party(1, "alice");
+    let b = party(2, "bob");
     let alias = Did::parse("did:alice:bob-alias").unwrap();
     let alias_cert = DeviceCert::issue(
         &b.master,
@@ -314,7 +312,6 @@ fn a_responder_proving_another_subject_than_the_one_dialled_is_refused() {
         b.cred.noise_static_public(),
         ISSUED_AT,
         NOT_AFTER,
-        [8; 16],
     )
     .unwrap();
     let mut policy_a = Policy::knowing(&[&b]);
@@ -335,7 +332,7 @@ fn a_responder_proving_another_subject_than_the_one_dialled_is_refused() {
 
 #[test]
 fn the_handshake_signature_covers_the_transcript_and_the_static_key() {
-    let a = party(1, "alice", [1; 16]);
+    let a = party(1, "alice");
     let h = [0x42; 32];
     let sig = sign_handshake(&a.cred, &h).unwrap();
     let s_pub = a.cred.noise_static_public();
@@ -370,8 +367,8 @@ fn the_handshake_signature_covers_the_transcript_and_the_static_key() {
 fn a_certificate_naming_another_static_key_than_the_handshake_used_is_refused() {
     // mallory signs the right digest (her transcript and the static key she uses) under a certificate that
     // names another static key: the signature verifies, the certificate does not cover the key
-    let mallory = party(3, "mallory", [3; 16]);
-    let b = party(2, "bob", [2; 16]);
+    let mallory = party(3, "mallory");
+    let b = party(2, "bob");
     let used = Keypair::from_secret([0x55; 32]);
     let device = KeyPair::from_seed([103; 32]);
     let cert = mallory.cred.cert().clone();
@@ -410,14 +407,14 @@ fn a_certificate_naming_another_static_key_than_the_handshake_used_is_refused() 
 fn a_handshake_signature_relayed_from_another_session_is_refused() {
     // the victim connects to the attacker, who acts as an honest responder and so reads the victim's
     // signature; the attacker then presents that signature to a server in a second session
-    let victim = party(1, "victim", [1; 16]);
-    let attacker = party(3, "mallory", [3; 16]);
-    let server = party(2, "server", [2; 16]);
+    let victim = party(1, "victim");
+    let attacker = party(3, "mallory");
+    let server = party(2, "server");
 
     // session 1: victim -> attacker (the attacker drives the Noise layer itself)
     let victim_policy = Policy::knowing(&[&attacker]);
     let att_cert = attacker.cred.cert().clone();
-    let att_cred_1 = party(3, "mallory", [3; 16]).cred;
+    let att_cred_1 = party(3, "mallory").cred;
     let (captured, _victim_side) = pair(
         move |mut s| {
             let mut hs = HandshakeState::responder(PROLOGUE, att_cred_1.noise_static().clone());
@@ -453,7 +450,7 @@ fn a_handshake_signature_relayed_from_another_session_is_refused() {
 
 #[test]
 fn a_credential_needs_the_device_key_and_the_static_key_its_certificate_names() {
-    let a = party(1, "alice", [1; 16]);
+    let a = party(1, "alice");
     let wrong = KeyPair::from_seed([77; 32]);
     assert!(matches!(
         Credential::new(
@@ -484,8 +481,8 @@ fn a_credential_needs_the_device_key_and_the_static_key_its_certificate_names() 
 fn connect_gives_up_on_a_responder_that_never_answers() {
     // a responder that reads the first message and stays silent: connect ends with Timeout
     use std::time::Duration;
-    let a = party(1, "alice", [1; 16]);
-    let b = party(2, "bob", [2; 16]);
+    let a = party(1, "alice");
+    let b = party(2, "bob");
     let policy_a = Policy::knowing(&[&b]);
     let b_cert = b.cred.cert().clone();
     let (_, client) = pair(
@@ -518,8 +515,8 @@ fn an_operation_that_did_not_finish_poisons_the_blocking_channel() {
     // the peer writes half a frame and stops; the receive times out mid-frame, and the channel then
     // refuses every further operation instead of reading the rest as the start of the next frame
     use std::time::Duration;
-    let a = party(1, "alice", [1; 16]);
-    let b = party(2, "bob", [2; 16]);
+    let a = party(1, "alice");
+    let b = party(2, "bob");
     let policy_b = Policy::knowing(&[&a]);
     let policy_a = Policy::knowing(&[&b]);
     let b_cert = b.cred.cert().clone();
@@ -593,8 +590,8 @@ fn accept_against(
     confirm: Confirm,
     deadline: std::time::Duration,
 ) -> (Option<ChannelError>, std::time::Duration) {
-    let a = party(1, "alice", [1; 16]);
-    let b = party(2, "bob", [2; 16]);
+    let a = party(1, "alice");
+    let b = party(2, "bob");
     let policy_b = Policy::knowing(&[&a]);
     let rs = b.cred.noise_static_public();
     let cred_b = b.cred;
@@ -654,8 +651,8 @@ fn a_replayed_first_message_yields_no_channel() {
     // an observer replays an accepted initiator's first message: the responder answers, but without the
     // initiator's ephemeral key the observer cannot make the confirmation, and a guess does not open
     use std::time::Duration;
-    let a = party(1, "alice", [1; 16]);
-    let b = party(2, "bob", [2; 16]);
+    let a = party(1, "alice");
+    let b = party(2, "bob");
     let rs = b.cred.noise_static_public();
     let mut hs = HandshakeState::initiator(PROLOGUE, a.cred.noise_static().clone(), rs);
     let m0 = hs
@@ -687,7 +684,7 @@ fn accept_drops_a_silent_dialer_at_the_deadline_without_writing() {
     // a connection that opens and sends nothing: accept ends with Timeout at its deadline, and the
     // dialer reads nothing back
     use std::time::Duration;
-    let b = party(2, "bob", [2; 16]);
+    let b = party(2, "bob");
     let policy_b = Policy::knowing(&[]);
     let cred_b = b.cred;
     let deadline = Duration::from_millis(300);
@@ -715,7 +712,7 @@ fn the_first_message_deadline_is_total_not_per_read() {
     // a dialer that sends its first frame one byte every 0.6 x the deadline: each read would finish in
     // time, the whole never does
     use std::time::Duration;
-    let b = party(2, "bob", [2; 16]);
+    let b = party(2, "bob");
     let policy_b = Policy::knowing(&[]);
     let cred_b = b.cred;
     let deadline = Duration::from_millis(400);

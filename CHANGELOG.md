@@ -5,6 +5,7 @@ All notable changes to ALICE-Channel are documented here. While crates.io is fro
 ## [Unreleased]
 
 ### Changed
+- `alice-identity` の要求を 2.0 にする (証明書の version 3、端末の id は subject と device key から導く) handshake は証明書を運ぶので、試験 `a_fixed_handshake_gives_fixed_packets` の init と response の digest を記録し直した (confirmation と data packet、`CHANNEL_SEMANTICS_ID` は変わらない) 試験の証明書は id の引数を取らず、失効の試験は証明書の `device_id()` を失効させる
 - `alice-crypto` / `alice-identity` / `alice-sign` を git の commit 固定でなく `branch = "main"` で取る (Cargo.lock が固定する) 同じ crate を取る他の消費者と同じ source になり、一緒に build した時に 1 つずつだけ link される lock の解決: alice-crypto は ed065ad のまま、alice-identity は 55be137 から f09fc22、alice-sign は bb79209 から 8c8d1ee (試験 88 本は通る)
 - `alice-crypto` を main の `ed065ad` に上げる (SHA-256 の逐次計算の追加と CI の変更のみ、wire の bytes と識別子は変わらない)
 - CI (ALICE-Law G9 / G11): 識別子の移動の検査器 (`scripts/id_move_check.py` と試験) を共有の新しい bytes にし、新しく足した associated const を受けるようにした 他の共有の file も ALICE-Law 40973a8a の表が計画した bytes にし、shared-files と G11 の表の pin を上げた
