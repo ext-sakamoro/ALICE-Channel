@@ -421,6 +421,18 @@ fn read_frame_before<S: Read + ReadTimeout>(
     read
 }
 
+/// Read one frame within `deadline` after the handshake; `Err((e, started))` tells whether any byte of the
+/// frame was taken from the stream
+pub(crate) fn read_frame_within<S: Read + ReadTimeout>(
+    stream: &mut S,
+    deadline: Duration,
+) -> Result<Vec<u8>, (ChannelError, bool)> {
+    stream
+        .set_read_timeout(Some(deadline.max(Duration::from_millis(1))))
+        .map_err(|e| (io(&e), false))?;
+    read_frame(stream).map_err(|e| (e, false))
+}
+
 /// An open channel: the peer's certificate and the transport keys over `S`
 pub struct SecureChannel<S> {
     stream: S,
@@ -430,6 +442,25 @@ pub struct SecureChannel<S> {
 }
 
 impl<S: Read + Write + ReadTimeout> SecureChannel<S> {
+    /// Receive the next message, waiting at most `deadline` for the whole of it
+    ///
+    /// # Errors
+    /// [`ChannelError::Timeout`] when the message has not all come by then: the channel stays usable when
+    /// no byte of it had come, and is poisoned otherwise; as [`Self::recv`] for the rest
+    pub fn recv_before(&mut self, deadline: Duration) -> Result<Vec<u8>, ChannelError> {
+        if self.poisoned {
+            return Err(ChannelError::Poisoned);
+        }
+        let frame = read_frame_within(&mut self.stream, deadline).map_err(|(e, started)| {
+            self.poisoned = started;
+            e
+        })?;
+        self.poisoned = true;
+        let payload = self.transport.recv(&frame)?;
+        self.poisoned = false;
+        Ok(payload)
+    }
+
     /// Open a channel to the device `peer` certifies, as the side that connected, waiting
     /// [`DEFAULT_CONFIRM_TIMEOUT`] for the responder's message
     ///

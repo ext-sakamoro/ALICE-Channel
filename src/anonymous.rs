@@ -23,8 +23,8 @@ use alice_identity::device_cert::DeviceCert;
 use crate::noise::nk::NkHandshakeState;
 use crate::noise::{NoiseError, Transport};
 use crate::{
-    dial_key, open_confirmation, read_frame, read_frame_before, write_frame, ChannelError,
-    Credential, PeerPolicy, ReadTimeout, CONFIRMATION_LEN, MAX_PAYLOAD,
+    dial_key, open_confirmation, read_frame, read_frame_before, read_frame_within, write_frame,
+    ChannelError, Credential, PeerPolicy, ReadTimeout, CONFIRMATION_LEN, MAX_PAYLOAD,
 };
 
 /// The Noise prologue of an anonymous channel (different from [`crate::PROLOGUE`], so neither kind of first
@@ -44,6 +44,25 @@ pub struct AnonymousChannel<S> {
 }
 
 impl<S: Read + Write + ReadTimeout> AnonymousChannel<S> {
+    /// Receive the next message, waiting at most `deadline` for the whole of it
+    ///
+    /// # Errors
+    /// [`ChannelError::Timeout`] when the message has not all come by then: the channel stays usable when
+    /// no byte of it had come, and is poisoned otherwise; as [`Self::recv`] for the rest
+    pub fn recv_before(&mut self, deadline: Duration) -> Result<Vec<u8>, ChannelError> {
+        if self.poisoned {
+            return Err(ChannelError::Poisoned);
+        }
+        let frame = read_frame_within(&mut self.stream, deadline).map_err(|(e, started)| {
+            self.poisoned = started;
+            e
+        })?;
+        self.poisoned = true;
+        let payload = self.transport.recv(&frame)?;
+        self.poisoned = false;
+        Ok(payload)
+    }
+
     /// Open an anonymous channel to the device `responder` certifies, waiting
     /// [`crate::DEFAULT_CONFIRM_TIMEOUT`] for its message
     ///
