@@ -22,6 +22,8 @@ use alice_crypto::chacha20poly1305_ietf as aead;
 use alice_crypto::{random, sha256, x25519};
 use zeroize::{Zeroize, Zeroizing};
 
+pub mod nk;
+
 /// The protocol name; it is exactly 32 bytes, so it is the initial handshake hash as it stands
 pub const PROTOCOL_NAME: &[u8; 32] = b"Noise_IK_25519_ChaChaPoly_SHA256";
 
@@ -216,10 +218,24 @@ struct SymmetricState {
 
 impl SymmetricState {
     fn new() -> Self {
+        Self::for_protocol(PROTOCOL_NAME)
+    }
+
+    /// The initial state of a protocol whose name is exactly 32 bytes (section 5.2, `InitializeSymmetric`)
+    fn for_protocol(name: &[u8; 32]) -> Self {
         Self {
-            ck: Zeroizing::new(*PROTOCOL_NAME),
-            h: *PROTOCOL_NAME,
+            ck: Zeroizing::new(*name),
+            h: *name,
             cipher: CipherState::empty(),
+        }
+    }
+
+    /// A copy to work on, kept only when a whole message succeeds
+    fn clone_state(&self) -> Self {
+        Self {
+            ck: self.ck.clone(),
+            h: self.h,
+            cipher: self.cipher.clone(),
         }
     }
 

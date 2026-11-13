@@ -235,3 +235,63 @@ file = "src/noise.rs"
 name = "write_message_with"
 class = "handshake message"
 reason = "a Noise handshake message and its payload"
+
+[[function]]
+file = "src/anonymous.rs"
+name = "handshake_hash"
+class = "handshake hash"
+reason = "the Noise NK handshake hash h, a SHA-256 transcript digest that binds a session"
+
+[[function]]
+file = "src/anonymous.rs"
+name = "recv"
+class = "transport message"
+reason = "the payload of a received message, opened with the session's cipher; the peer's bytes as they were sent"
+
+[[function]]
+file = "src/anonymous.rs"
+name = "send"
+class = "transport message"
+reason = "a payload sealed with the session's cipher (ChaCha20-Poly1305); the caller's bytes, no Law-bearing value"
+
+[[function]]
+file = "src/noise/nk.rs"
+name = "handshake_hash"
+class = "handshake hash"
+reason = "the Noise NK handshake hash h, a SHA-256 transcript digest that binds a session"
+
+[[function]]
+file = "src/noise/nk.rs"
+name = "initiator"
+class = "handshake input"
+reason = "the prologue bytes and the responder's static public key of an NK handshake"
+
+[[function]]
+file = "src/noise/nk.rs"
+name = "initiator_with_ephemeral"
+class = "handshake input"
+reason = "the prologue and keys of an NK handshake with a given ephemeral key (the test vectors)"
+
+[[function]]
+file = "src/noise/nk.rs"
+name = "read_message"
+class = "handshake message"
+reason = "a received Noise NK handshake message and its payload"
+
+[[function]]
+file = "src/noise/nk.rs"
+name = "responder"
+class = "handshake input"
+reason = "the prologue bytes of an NK handshake"
+
+[[function]]
+file = "src/noise/nk.rs"
+name = "responder_with_ephemeral"
+class = "handshake input"
+reason = "the prologue and keys of an NK handshake with a given ephemeral key (the test vectors)"
+
+[[function]]
+file = "src/noise/nk.rs"
+name = "write_message"
+class = "handshake message"
+reason = "a Noise NK handshake message and its payload"
