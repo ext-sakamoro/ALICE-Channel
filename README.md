@@ -19,7 +19,7 @@ On the wire every Noise message is one frame: a big-endian `u16` length, then th
 
 `AnonymousChannel` authenticates only the responder, for a peer that should not learn who connected: it runs `Noise_NK_25519_ChaChaPoly_SHA256` with the prologue `alice-channel anonymous v1`, the initiator sends only an ephemeral key and an empty payload, and no certificate, static key or signature of the initiator crosses the wire. The responder's side holds no certificate of its peer. The two prologues differ, so a first message of one kind never opens as the other.
 
-`recv_before(deadline)` (on both channel types) waits at most `deadline` for the whole of the next message, however its bytes arrive. A `Timeout` before any byte of it leaves the channel usable; a `Timeout` after part of it poisons the channel. A deadline of zero gives `Timeout` without reading, and the stream's own read timeout is set back afterwards.
+`recv_before(deadline)` (on both channel types) waits at most `deadline` for the whole of the next message, however its bytes arrive. A `Timeout` before any byte of it leaves the channel usable; a `Timeout` after part of it poisons the channel. A deadline of zero gives `Timeout` without reading, and the stream's own read timeout is set back afterwards (a channel whose stream could not be set back is poisoned).
 
 With the `async` feature, `AsyncSecureChannel` runs the same handshake over tokio streams. Its futures are safe to drop: a dropped handshake gives no channel, and a dropped send or receive poisons the channel.
 

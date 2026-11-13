@@ -452,7 +452,8 @@ pub(crate) fn read_frame_within<S: Read + ReadTimeout>(
     let restored = stream.set_read_timeout(before);
     match read {
         Ok(frame) => restored.map(|()| frame).map_err(|e| (io(&e), true)),
-        Err(e) => Err((e, taken > 0)),
+        // a stream left with the call's short timeout is not used on as if nothing had happened
+        Err(e) => Err((e, taken > 0 || restored.is_err())),
     }
 }
 
