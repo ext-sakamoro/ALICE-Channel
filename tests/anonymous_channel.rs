@@ -423,8 +423,12 @@ fn a_replayed_first_message_never_yields_a_channel() {
         move |s| AnonymousChannel::accept_with_timeout(s, &relay.cred, SHORT).map(|_| ()),
         move |mut s| {
             write_frame(&mut s, &first);
-            let _ = read_back(&mut s);
+            // stay connected until the responder gives up and closes, so its deadline (not this side going
+            // away) is what ends the handshake
+            s.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
+            let mut buf = [0u8; 512];
+            while matches!(s.read(&mut buf), Ok(n) if n > 0) {}
         },
     );
-    assert!(matches!(server, Err(ChannelError::Timeout)));
+    assert!(matches!(server, Err(ChannelError::Timeout)), "{server:?}");
 }
