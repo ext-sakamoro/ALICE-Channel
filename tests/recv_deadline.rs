@@ -94,6 +94,8 @@ struct Probe {
     inner: Arc<Mutex<TcpStream>>,
     reads: Arc<AtomicUsize>,
     timeout: Arc<Mutex<Option<Duration>>>,
+    /// when set, setting this timeout fails (to make setting back the caller's timeout fail)
+    refuse: Arc<Mutex<Option<Option<Duration>>>>,
 }
 
 impl Read for Probe {
@@ -119,6 +121,9 @@ impl ReadTimeout for Probe {
         Ok(*self.timeout.lock().unwrap())
     }
     fn set_read_timeout(&self, t: Option<Duration>) -> std::io::Result<()> {
+        if *self.refuse.lock().unwrap() == Some(t) {
+            return Err(std::io::Error::other("refused"));
+        }
         self.inner.lock().unwrap().set_read_timeout(t)?;
         *self.timeout.lock().unwrap() = t;
         Ok(())
@@ -130,6 +135,7 @@ fn probe(s: TcpStream) -> Probe {
         inner: Arc::new(Mutex::new(s)),
         reads: Arc::new(AtomicUsize::new(0)),
         timeout: Arc::new(Mutex::new(None)),
+        refuse: Arc::new(Mutex::new(None)),
     }
 }
 
@@ -334,6 +340,26 @@ fn a_timeout_after_part_of_a_frame_poisons_the_channel() {
         raw.write_all(&[0x10]).unwrap();
         assert!(
             matches!(ch.within(DEADLINE), Err(ChannelError::Poisoned)),
+            "{name}"
+        );
+    }
+}
+
+#[test]
+fn a_timeout_that_cannot_set_back_the_stream_timeout_poisons_the_channel() {
+    for (name, make) in BOTH {
+        let (mut ch, p, _raw, mut send) = make();
+        p.set_read_timeout(STREAM_TIMEOUT).unwrap();
+        *p.refuse.lock().unwrap() = Some(STREAM_TIMEOUT);
+        assert!(
+            matches!(ch.within(DEADLINE), Err(ChannelError::Timeout)),
+            "{name}"
+        );
+        // the stream kept the short timeout of the call: the channel is not used on as if it had not
+        *p.refuse.lock().unwrap() = None;
+        send(b"later");
+        assert!(
+            matches!(ch.within(MARGIN), Err(ChannelError::Poisoned)),
             "{name}"
         );
     }
