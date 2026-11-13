@@ -81,6 +81,12 @@ jobs:
         run: python3 scripts/test_clippy_external_coverage.py
       - name: Clippy external coverage (every public function of a named module is banned or allowed)
         run: python3 scripts/clippy_external_coverage.py
+      # another crate's PREVIOUS_*_SEMANTICS_IDS is used only as a whole list (an upstream empties it on
+      # a major version; scripts/upstream_previous_ids_check.py, shared with the other ALICE crates)
+      - name: Upstream previous identifiers (test, then whole-list uses only)
+        run: |
+          python3 scripts/test_upstream_previous_ids_check.py
+          python3 scripts/upstream_previous_ids_check.py
       # G9: an identifier (CHANNEL_SEMANTICS_ID) moves only with a breaking version, with both
       # values named in CHANGELOG.md, compared with the newest release (scripts/id_move_check.py,
       # shared with the other ALICE crates)
