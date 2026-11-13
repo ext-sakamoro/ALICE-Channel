@@ -22,6 +22,8 @@ use alice_crypto::chacha20poly1305_ietf as aead;
 use alice_crypto::{random, sha256, x25519};
 use zeroize::{Zeroize, Zeroizing};
 
+pub mod nk;
+
 /// The protocol name; it is exactly 32 bytes, so it is the initial handshake hash as it stands
 pub const PROTOCOL_NAME: &[u8; 32] = b"Noise_IK_25519_ChaChaPoly_SHA256";
 

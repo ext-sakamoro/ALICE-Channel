@@ -32,6 +32,7 @@
 
 #![warn(clippy::all, clippy::pedantic, clippy::nursery)]
 
+pub mod anonymous;
 mod clock;
 pub mod datagram;
 pub mod noise;
@@ -39,6 +40,7 @@ pub mod semantics;
 
 #[cfg(feature = "async")]
 mod async_channel;
+pub use anonymous::{AnonymousChannel, ANONYMOUS_PROLOGUE};
 #[cfg(feature = "async")]
 pub use async_channel::{AsyncRecvHalf, AsyncSecureChannel, AsyncSendHalf};
 
