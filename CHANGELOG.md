@@ -36,6 +36,8 @@ All notable changes to ALICE-Channel are documented here. While crates.io is fro
 - `ChannelError` に `Timeout` と `Poisoned` を足した 終わらなかった送受信 (I/O の error、async では future を落とした時) の後、channel は `Poisoned` を返して使えなくなる (相手とずれたまま続けない)
 
 ### Added
+- `SecureChannel::recv_before` / `AnonymousChannel::recv_before`: 次の message 全体を `deadline` まで待つ (byte が少しずつ届いても期限は延びない) message の最初の byte が来る前の `Timeout` では channel は使えるまま、途中まで読んだ後の `Timeout` では `Poisoned` 期限 0 は読まずに `Timeout`、stream の読み取り期限は呼ぶ前の値に戻す 試験 `tests/recv_deadline.rs` `ChannelError::Timeout` の表示を「the peer did not send in time」にした
+- `AnonymousChannel` (`Noise_NK_25519_ChaChaPoly_SHA256`、prologue `alice-channel anonymous v1`): responder だけを認証する channel initiator は ephemeral key と空の payload だけを送り、initiator の証明書・静的鍵・署名は wire に出ない 2 つの prologue は異なるので、一方の初手は他方として開かない 試験 `tests/noise_nk_vectors.rs` (cacophony の NK vector) / `tests/anonymous_channel.rs`
 - CI: 他の crate の `PREVIOUS_*_SEMANTICS_IDS` は一覧全体としてだけ使える (`contains` / `len` / `is_empty`、全体を回す iterator や for、引数として丸ごと渡す) とし、添字・slice のパターン・`.first` / `next` / `take` などを拒む `scripts/upstream_previous_ids_check.py` と試験を足した (ALICE-Edge と同じ中身の共有 file) 上流は major で一覧を空にする 走査した .rs が 0 件なら失敗 (ci.yml と preflight)
 
 - `semantics::CHANNEL_SEMANTICS_ID` (`7808060196ea5d8d…a76916d92`): 固定の鍵の handshake と transport、datagram の golden と alice-crypto の `CRYPTO_SEMANTICS_ID` の fold `CHANNEL_SEMANTICS_PINS` / `CHANNEL_SEMANTICS_CHECKED_AT`

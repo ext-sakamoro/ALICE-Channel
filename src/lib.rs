@@ -115,7 +115,7 @@ impl core::fmt::Display for ChannelError {
             Self::Rejected(e) => write!(f, "the peer was refused: {e}"),
             Self::Credential(e) => write!(f, "this side's credential cannot sign: {e}"),
             Self::TooLong => f.write_str("the channel payload is too long"),
-            Self::Timeout => f.write_str("the peer did not continue the handshake in time"),
+            Self::Timeout => f.write_str("the peer did not send in time"),
             Self::StaticKeyMismatch => {
                 f.write_str("the certificate names another Noise static key")
             }
@@ -372,6 +372,16 @@ fn read_before<S: Read + ReadTimeout>(
     buf: &mut [u8],
     end: Instant,
 ) -> Result<(), ChannelError> {
+    read_counted(stream, buf, end, &mut 0)
+}
+
+/// [`read_before`], adding to `taken` every byte it takes from the stream
+fn read_counted<S: Read + ReadTimeout>(
+    stream: &mut S,
+    buf: &mut [u8],
+    end: Instant,
+    taken: &mut usize,
+) -> Result<(), ChannelError> {
     let mut filled = 0;
     while filled < buf.len() {
         let left = end.saturating_duration_since(clock::now());
@@ -381,7 +391,10 @@ fn read_before<S: Read + ReadTimeout>(
         stream.set_read_timeout(Some(left)).map_err(|e| io(&e))?;
         match stream.read(&mut buf[filled..]) {
             Ok(0) => return Err(ChannelError::Closed),
-            Ok(n) => filled += n,
+            Ok(n) => {
+                filled += n;
+                *taken += n;
+            }
             Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
             Err(e)
                 if matches!(
@@ -427,10 +440,32 @@ pub(crate) fn read_frame_within<S: Read + ReadTimeout>(
     stream: &mut S,
     deadline: Duration,
 ) -> Result<Vec<u8>, (ChannelError, bool)> {
-    stream
-        .set_read_timeout(Some(deadline.max(Duration::from_millis(1))))
-        .map_err(|e| (io(&e), false))?;
-    read_frame(stream).map_err(|e| (e, false))
+    let before = stream.read_timeout().map_err(|e| (io(&e), false))?;
+    let now = clock::now();
+    // one end for the whole frame: each byte that comes does not move it
+    let end = now
+        .checked_add(deadline)
+        .unwrap_or_else(|| now + Duration::from_secs(u64::from(u32::MAX)));
+    let mut taken = 0;
+    let read = frame_by(stream, end, &mut taken);
+    // the stream's own timeout is set back whatever happened
+    let restored = stream.set_read_timeout(before);
+    match read {
+        Ok(frame) => restored.map(|()| frame).map_err(|e| (io(&e), true)),
+        Err(e) => Err((e, taken > 0)),
+    }
+}
+
+fn frame_by<S: Read + ReadTimeout>(
+    stream: &mut S,
+    end: Instant,
+    taken: &mut usize,
+) -> Result<Vec<u8>, ChannelError> {
+    let mut head = [0u8; 2];
+    read_counted(stream, &mut head, end, taken)?;
+    let mut body = vec![0u8; usize::from(u16::from_be_bytes(head))];
+    read_counted(stream, &mut body, end, taken)?;
+    Ok(body)
 }
 
 /// An open channel: the peer's certificate and the transport keys over `S`

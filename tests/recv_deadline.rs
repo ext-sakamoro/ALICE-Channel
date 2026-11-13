@@ -17,7 +17,7 @@ use std::net::{TcpListener, TcpStream};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use alice_channel::noise::Keypair;
 use alice_channel::{
@@ -211,6 +211,24 @@ fn named() -> (Box<dyn Receiving>, Probe, TcpStream, Send) {
     )
 }
 
+/// The wall clock of the timing tests (how long a deadline takes; no Law value)
+#[expect(
+    clippy::disallowed_methods,
+    reason = "a timing test measures a deadline on the monotonic clock"
+)]
+fn started() -> std::time::Instant {
+    std::time::Instant::now()
+}
+
+/// The time since `start` (see [`started`])
+#[expect(
+    clippy::disallowed_methods,
+    reason = "a timing test measures a deadline on the monotonic clock"
+)]
+fn waited(start: std::time::Instant) -> Duration {
+    start.elapsed()
+}
+
 type Maker = fn() -> (Box<dyn Receiving>, Probe, TcpStream, Send);
 const BOTH: [(&str, Maker); 2] = [("anonymous", anonymous), ("named", named)];
 
@@ -219,9 +237,9 @@ fn a_silent_peer_gives_timeout_at_the_deadline() {
     for (name, make) in BOTH {
         let (mut ch, p, _raw, _send) = make();
         p.set_read_timeout(STREAM_TIMEOUT).unwrap();
-        let t0 = Instant::now();
+        let t0 = started();
         let r = ch.within(DEADLINE);
-        let took = t0.elapsed();
+        let took = waited(t0);
         assert!(matches!(r, Err(ChannelError::Timeout)), "{name}: {r:?}");
         assert!(took >= DEADLINE, "{name}: gave up after {took:?}");
         assert!(took < DEADLINE + MARGIN, "{name}: took {took:?}");
@@ -248,9 +266,9 @@ fn a_peer_sending_one_byte_at_a_time_gives_timeout_by_the_deadline() {
                 }
             }
         });
-        let t0 = Instant::now();
+        let t0 = started();
         let r = ch.within(DEADLINE);
-        let took = t0.elapsed();
+        let took = waited(t0);
         assert!(matches!(r, Err(ChannelError::Timeout)), "{name}: {r:?}");
         assert!(took < DEADLINE + MARGIN, "{name}: took {took:?}");
         assert!(
