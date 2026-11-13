@@ -130,6 +130,12 @@ reason = "the payload of a received message, opened with the session's cipher; t
 
 [[function]]
 file = "src/lib.rs"
+name = "recv_before"
+class = "transport message"
+reason = "the payload of a received message within a deadline, opened with the session's cipher; the peer's bytes as they were sent"
+
+[[function]]
+file = "src/lib.rs"
 name = "send"
 class = "transport message"
 reason = "a payload sealed with the session's cipher (ChaCha20-Poly1305); the caller's bytes, no Law-bearing value"
@@ -247,6 +253,12 @@ file = "src/anonymous.rs"
 name = "recv"
 class = "transport message"
 reason = "the payload of a received message, opened with the session's cipher; the peer's bytes as they were sent"
+
+[[function]]
+file = "src/anonymous.rs"
+name = "recv_before"
+class = "transport message"
+reason = "the payload of a received message within a deadline, opened with the session's cipher; the peer's bytes as they were sent"
 
 [[function]]
 file = "src/anonymous.rs"
