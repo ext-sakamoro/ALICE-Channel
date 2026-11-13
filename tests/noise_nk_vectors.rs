@@ -170,7 +170,12 @@ fn messages_out_of_turn_truncated_and_early_transport_are_refused() {
     let (mut init, mut resp) = parties(&v);
     assert_eq!(resp.write_message(b""), Err(NoiseError::OutOfTurn));
     assert_eq!(init.read_message(&[0; 48]), Err(NoiseError::OutOfTurn));
-    assert_eq!(resp.read_message(&[0; 47]), Err(NoiseError::Truncated));
+    // shorter than the ephemeral key
+    assert_eq!(resp.read_message(&[0; 31]), Err(NoiseError::Truncated));
+    // an ephemeral key (a valid point) but less than a tag after it
+    let mut short = Keypair::from_secret([0x41; 32]).public().to_vec();
+    short.extend_from_slice(&[0; 15]);
+    assert_eq!(resp.read_message(&short), Err(NoiseError::Truncated));
     assert!(matches!(
         init.into_transport(),
         Err(NoiseError::NotFinished)
