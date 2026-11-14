@@ -39,7 +39,7 @@ use crate::{
     Credential, PeerPolicy, ReadTimeout, CONFIRMATION_LEN, MAX_PAYLOAD,
 };
 
-#[cfg(all(test, not(all(target_arch = "wasm32", target_os = "unknown"))))]
+#[cfg(test)]
 mod vectors;
 
 /// The Noise prologue of an anonymous channel (different from [`crate::PROLOGUE`], so neither kind of first

@@ -4,6 +4,9 @@
 //! handshake). The stream channel is held to it here; the state machines are held to the same bytes in
 //! `tests/anonymous_vectors.rs` (feature `test-vectors`).
 
+// the recorded run uses TCP sockets and threads, which wasm32-unknown-unknown does not have
+#![cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
+
 use std::collections::BTreeMap;
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
