@@ -180,10 +180,11 @@ jobs:
       - name: Anonymous handshake vectors (feature test-vectors)
         run: scripts/run_tests.sh anonymous_vectors=2 -- cargo test --locked --profile "${CARGO_PROFILE}" --features test-vectors --test anonymous_vectors
 
-      # PinnedPeer (one subject under one master key, service certificate rules included) and the anonymous
-      # handshake over a message transport; fewer than 15 tests run (0 included) fails
-      - name: Pinned peer and the anonymous handshake over messages
-        run: scripts/run_tests.sh pinned_peer=15 -- cargo test --locked --profile "${CARGO_PROFILE}" --test pinned_peer
+      # PinnedPeer (one subject under one master key, service certificate rules included), the anonymous
+      # handshake over a message transport, and the peer kind a policy expects (a person or a named service,
+      # the other refused at the dial and in the handshake); fewer tests than named (0 included) fails
+      - name: Pinned peer, peer kind and the anonymous handshake over messages
+        run: scripts/run_tests.sh pinned_peer=15,peer_kind=8 -- cargo test --locked --profile "${CARGO_PROFILE}" --test pinned_peer --test peer_kind
 
       # ALICE-Law G11: ALICE-Law's own self-check at the pinned revision (table, rows, shared copies, own copies
       # at their targets, manifest and its anchors), on every leg of the matrix

@@ -55,8 +55,8 @@ use std::io::{Read, Write};
 use std::time::Duration;
 
 use alice_identity::artifact::{
-    sha256_payload, sign_artifact, verify_artifact, ArtifactError, ArtifactSignature,
-    PayloadDigest, Revocation,
+    sha256_payload, sign_artifact, verify_artifact, verify_service_artifact, ArtifactError,
+    ArtifactSignature, PayloadDigest, Revocation,
 };
 use alice_identity::device_cert::{DeviceCert, DeviceCertError};
 use alice_identity::did::Did;
@@ -144,6 +144,22 @@ impl From<NoiseError> for ChannelError {
     }
 }
 
+/// Which kind of certificate a [`PeerPolicy`] expects its peers to present
+///
+/// `alice-identity` keeps the two apart: a device certificate of a person is accepted by the device
+/// certificate rules (`DeviceCert::verify`, `verify_artifact`), which refuse a service certificate, and a
+/// service certificate (`did:alice-service:<service>`) by the service certificate rules
+/// (`verify_service_cert`, `verify_service_artifact`), which refuse a person's. The policy states which one
+/// it expects; the certificate a peer presents never chooses
+#[non_exhaustive]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PeerKind<'a> {
+    /// A device of a person
+    Person,
+    /// The service of this name, under its operator's master key
+    Service(&'a str),
+}
+
 /// What the receiver of a handshake trusts: the master key of each subject, the revocation lists, the time
 pub trait PeerPolicy {
     /// The master key of `subject`, or `None` when the subject is not one this side accepts
@@ -152,12 +168,21 @@ pub trait PeerPolicy {
     fn revocation(&self) -> Revocation<'_>;
     /// The time at which the peer's certificate must be valid (seconds, as the certificate counts them)
     fn now(&self) -> u64;
+    /// Which kind of certificate this policy expects ([`PeerKind`]); the default is a device of a person
+    ///
+    /// Every certificate this side accepts is checked by the rules of this kind: for
+    /// [`PeerKind::Person`] the device certificate rules, which refuse a service certificate even under a
+    /// master key the policy trusts; for [`PeerKind::Service`] the service certificate rules of that service
+    /// (name, subject, lifetime bound, revocation), which refuse a person's certificate. Decide it from what
+    /// the policy trusts, never from the certificate presented
+    fn expected_peer(&self) -> PeerKind<'_> {
+        PeerKind::Person
+    }
     /// A further check of a peer's certificate, run after it has passed the checks above (its subject's
     /// master key, verification at [`Self::now`], revocation) and before it is acted on
     ///
     /// Every certificate this side accepts goes through it: the one it dials ([`check_cert`]) and the one a
-    /// peer proves in a handshake. The default accepts; [`PinnedPeer`] uses it to apply the service
-    /// certificate rules of `alice-identity` (`verify_service_cert`) to a service
+    /// peer proves in a handshake. The default accepts
     ///
     /// # Errors
     /// The refusal to report
@@ -175,10 +200,11 @@ pub trait PeerPolicy {
 /// [`ChannelError::Rejected`] (`IssuerMismatch`), both before anything is written.
 ///
 /// When the subject is a service DID (`did:alice-service:<service>`, from [`Self::service`] or given to
-/// [`Self::new`]), every certificate this policy accepts must also pass `verify_service_cert` for that
-/// service: the service name rule and the bound on the lifetime (`not_after - issued_at` at most
-/// `SERVICE_CERT_MAX_LIFETIME_SECS`) are checked as well as the device certificate rules, so dialling a
-/// service never accepts a certificate the service certificate rules refuse
+/// [`Self::new`]), the policy expects that service ([`PeerKind::Service`]): every certificate it accepts is
+/// checked by `verify_service_cert` (the service name rule, the subject, the bound on the lifetime
+/// `not_after - issued_at` at most `SERVICE_CERT_MAX_LIFETIME_SECS`, revocation) and every handshake
+/// signature by `verify_service_artifact`, so dialling a service never accepts a certificate the service
+/// certificate rules refuse. Any other subject is a device of a person ([`PeerKind::Person`])
 #[derive(Debug, Clone)]
 pub struct PinnedPeer<'a> {
     subject: Did,
@@ -240,19 +266,12 @@ impl PeerPolicy for PinnedPeer<'_> {
     fn now(&self) -> u64 {
         self.now
     }
-    fn check_further(&self, cert: &DeviceCert) -> Result<(), ChannelError> {
-        if self.subject.method != SERVICE_DID_METHOD {
-            return Ok(());
+    fn expected_peer(&self) -> PeerKind<'_> {
+        if self.subject.method == SERVICE_DID_METHOD {
+            PeerKind::Service(&self.subject.id)
+        } else {
+            PeerKind::Person
         }
-        verify_service_cert(
-            cert,
-            &self.master,
-            &self.subject.id,
-            self.now,
-            self.revocation,
-        )
-        .map(|_| ())
-        .map_err(service_refusal)
     }
 }
 
@@ -267,6 +286,16 @@ const fn service_refusal(e: ServiceCertError) -> ChannelError {
         }
         // a malformed name, another service or not a service: not the subject this policy trusts
         _ => ChannelError::UnknownPeer,
+    }
+}
+
+/// A refusal of [`verify_service_artifact`] as the channel reports a refused peer: a certificate the service
+/// rules refuse as [`service_refusal`] reports it, any other refusal (context, digest, certificate,
+/// revocation, signature) as [`ChannelError::Rejected`]
+const fn service_artifact_refusal(e: ArtifactError) -> ChannelError {
+    match e {
+        ArtifactError::Service(e) => service_refusal(e),
+        e => ChannelError::Rejected(e),
     }
 }
 
@@ -347,8 +376,10 @@ pub fn sign_handshake(cred: &Credential, h: &[u8; 32]) -> Result<ArtifactSignatu
 
 /// Check `cert` against the policy as it stands
 ///
-/// The subject's master key is known, the certificate verifies under it at [`PeerPolicy::now`], no
-/// revocation list the policy holds revokes it, and [`PeerPolicy::check_further`] accepts it
+/// The subject's master key is known, the certificate verifies under it at [`PeerPolicy::now`] by the rules
+/// of the kind the policy expects ([`PeerPolicy::expected_peer`]: the device certificate rules for a person,
+/// `verify_service_cert` for a service), no revocation list the policy holds revokes it, and
+/// [`PeerPolicy::check_further`] accepts it
 ///
 /// # Errors
 /// [`ChannelError::UnknownPeer`], [`ChannelError::Rejected`]
@@ -356,11 +387,19 @@ pub fn check_cert(cert: &DeviceCert, policy: &impl PeerPolicy) -> Result<(), Cha
     let master = policy
         .master_of(cert.subject())
         .ok_or(ChannelError::UnknownPeer)?;
-    cert.verify(&master, policy.now())
-        .map_err(|e| ChannelError::Rejected(ArtifactError::Cert(e)))?;
-    if let Revocation::Checked(list) = policy.revocation() {
-        if list.revokes(cert) {
-            return Err(ChannelError::Rejected(ArtifactError::Revoked));
+    match policy.expected_peer() {
+        PeerKind::Service(service) => {
+            verify_service_cert(cert, &master, service, policy.now(), policy.revocation())
+                .map_err(service_refusal)?;
+        }
+        PeerKind::Person => {
+            cert.verify(&master, policy.now())
+                .map_err(|e| ChannelError::Rejected(ArtifactError::Cert(e)))?;
+            if let Revocation::Checked(list) = policy.revocation() {
+                if list.revokes(cert) {
+                    return Err(ChannelError::Rejected(ArtifactError::Revoked));
+                }
+            }
         }
     }
     policy.check_further(cert)
@@ -379,15 +418,28 @@ fn verify_peer(
         .ok_or(ChannelError::UnknownPeer)?;
     // the pattern carries or presupposes the static key before the payload, so it is known here
     let rs = rs.ok_or(ChannelError::Noise(NoiseError::OutOfTurn))?;
-    verify_artifact(
-        &sig,
-        &master,
-        HANDSHAKE_CONTEXT,
-        &handshake_digest(h, &rs),
-        policy.now(),
-        policy.revocation(),
-    )
-    .map_err(ChannelError::Rejected)?;
+    let digest = handshake_digest(h, &rs);
+    match policy.expected_peer() {
+        PeerKind::Service(service) => verify_service_artifact(
+            &sig,
+            &master,
+            service,
+            HANDSHAKE_CONTEXT,
+            &digest,
+            policy.now(),
+            policy.revocation(),
+        )
+        .map_err(service_artifact_refusal)?,
+        PeerKind::Person => verify_artifact(
+            &sig,
+            &master,
+            HANDSHAKE_CONTEXT,
+            &digest,
+            policy.now(),
+            policy.revocation(),
+        )
+        .map_err(ChannelError::Rejected)?,
+    }
     if *sig.cert().noise_static() != rs {
         return Err(ChannelError::StaticKeyMismatch);
     }

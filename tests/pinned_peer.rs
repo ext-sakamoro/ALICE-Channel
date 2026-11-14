@@ -2,8 +2,8 @@
 //! handshake over a message transport ([`connect_messages`] / [`accept_messages`]).
 //!
 //! A pinned service applies every rule `verify_service_cert` applies, so the dial path never accepts a
-//! certificate the service certificate rules refuse: a 31-day service certificate is refused although
-//! `DeviceCert::verify` alone would accept it. Each refusal is checked to happen before any byte is sent
+//! certificate the service certificate rules refuse: a 31-day service certificate is refused for its
+//! lifetime (and `DeviceCert::verify`, the rules of a person's device, refuses every service certificate). Each refusal is checked to happen before any byte is sent
 //! (the recording transport counts the calls), and each loop over cases counts what it compared, so an empty
 //! loop fails instead of passing.
 
@@ -23,7 +23,9 @@ use alice_channel::{
 };
 use alice_identity::artifact::{ArtifactError, Revocation};
 use alice_identity::cert_revocation::{CertRevocations, RevocationList};
-use alice_identity::device_cert::{DeviceCert, DeviceCertError};
+use alice_identity::device_cert::{
+    DeviceCert, DeviceCertError, DeviceId, DEVICE_CERT_CONTEXT, DEVICE_CERT_VERSION,
+};
 use alice_identity::did::Did;
 use alice_identity::service_cert::{
     issue_service_cert, service_subject, ServiceCertError, SERVICE_CERT_MAX_LIFETIME_SECS,
@@ -49,18 +51,39 @@ fn service_static() -> Keypair {
     Keypair::from_secret([0x5c; 32])
 }
 
-/// The fixture service certificate, valid for `lifetime` seconds from `ISSUED_AT` (issued through
-/// `DeviceCert::issue` so that a lifetime `issue_service_cert` refuses can be made too)
+/// The fixture service certificate, valid for `lifetime` seconds from `ISSUED_AT`
+///
+/// Up to the bound it is issued by `issue_service_cert`. A longer one, which no issuing function makes
+/// (`issue_service_cert` refuses the lifetime and `DeviceCert::issue` the reserved subject), is the
+/// documented version 3 layout signed by hand, as an operator signing by hand could make it
 fn service_cert_for(master: &KeyPair, service: &str, lifetime: u64) -> DeviceCert {
-    DeviceCert::issue(
-        master,
-        &service_subject(service).unwrap(),
-        service_device().public().0,
-        service_static().public(),
-        ISSUED_AT,
-        ISSUED_AT + lifetime,
-    )
-    .unwrap()
+    if lifetime <= SERVICE_CERT_MAX_LIFETIME_SECS {
+        return issue_service_cert(
+            master,
+            service,
+            service_device().public().0,
+            service_static().public(),
+            ISSUED_AT,
+            ISSUED_AT + lifetime,
+        )
+        .unwrap();
+    }
+    let subject = service_subject(service).unwrap();
+    let text = subject.to_string();
+    let key = service_device().public().0;
+    let mut body = vec![DEVICE_CERT_VERSION];
+    body.extend_from_slice(&u16::try_from(text.len()).unwrap().to_be_bytes());
+    body.extend_from_slice(text.as_bytes());
+    body.extend_from_slice(&key);
+    body.extend_from_slice(&service_static().public());
+    body.extend_from_slice(&ISSUED_AT.to_be_bytes());
+    body.extend_from_slice(&(ISSUED_AT + lifetime).to_be_bytes());
+    body.extend_from_slice(DeviceId::derive(&subject, &key).unwrap().as_bytes());
+    body.extend_from_slice(&master.public().0);
+    let mut signed = DEVICE_CERT_CONTEXT.to_vec();
+    signed.extend_from_slice(&body);
+    body.extend_from_slice(&master.sign(&signed).0);
+    DeviceCert::from_bytes(&body).unwrap()
 }
 
 /// The fixture service certificate at the longest lifetime a service certificate may have
@@ -361,10 +384,14 @@ fn each_refused_certificate_is_refused_at_dial_with_nothing_sent() {
 }
 
 #[test]
-fn a_31_day_service_cert_verifies_as_a_device_cert_but_is_refused_at_dial() {
+fn a_31_day_service_cert_is_refused_at_dial_and_by_the_device_cert_rules() {
     let cert = service_cert_for(&fixture_master(), SERVICE, 31 * 86_400);
-    // the device certificate rules alone accept it: the lifetime bound is a service certificate rule
-    cert.verify(&fixture_master().public(), NOW).unwrap();
+    // the device certificate rules (a person's device) refuse every service certificate
+    assert_eq!(
+        cert.verify(&fixture_master().public(), NOW),
+        Err(DeviceCertError::ReservedSubject)
+    );
+    // the service rules refuse its lifetime
     assert!(matches!(
         refused_at_dial(&cert, &pinned(NOW)),
         ChannelError::Rejected(ArtifactError::Cert(DeviceCertError::InvalidValidity))

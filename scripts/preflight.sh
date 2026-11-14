@@ -6,7 +6,7 @@
 # Run `--quick` before every push.
 #
 # usage: scripts/preflight.sh [--quick]   (--quick skips the test / bench suites)
-# generator rev a435b0d5d7655af2500185f73eb99726c67cee8e
+# generator rev 22eeb4ae73784d711cc6d977ce4e930ee9914972
 set -euo pipefail
 cd "$(dirname "$0")/.."
 # --- heavy slot (begin) ---
@@ -1009,10 +1009,10 @@ step "ci.yml / test: Anonymous handshake vectors (feature test-vectors) [profile
 ( export CARGO_TERM_COLOR="always" MIN_PASSED="72" MIN_PASSED_ASYNC="88" CARGO_PROFILE="test"; scripts/run_tests.sh anonymous_vectors=2 -- cargo test --locked --profile "${CARGO_PROFILE}" --features test-vectors --test anonymous_vectors )
 )
 
-step "ci.yml / test: Pinned peer and the anonymous handshake over messages [profile=debug]"
+step "ci.yml / test: Pinned peer, peer kind and the anonymous handshake over messages [profile=debug]"
 (
   gh_step ci.yml.test
-( export CARGO_TERM_COLOR="always" MIN_PASSED="72" MIN_PASSED_ASYNC="88" CARGO_PROFILE="test"; scripts/run_tests.sh pinned_peer=15 -- cargo test --locked --profile "${CARGO_PROFILE}" --test pinned_peer )
+( export CARGO_TERM_COLOR="always" MIN_PASSED="72" MIN_PASSED_ASYNC="88" CARGO_PROFILE="test"; scripts/run_tests.sh pinned_peer=15,peer_kind=8 -- cargo test --locked --profile "${CARGO_PROFILE}" --test pinned_peer --test peer_kind )
 )
 
 step "ci.yml / test: Test (lib, integration, doctests) [profile=release]"
@@ -1072,10 +1072,10 @@ step "ci.yml / test: Anonymous handshake vectors (feature test-vectors) [profile
 ( export CARGO_TERM_COLOR="always" MIN_PASSED="72" MIN_PASSED_ASYNC="88" CARGO_PROFILE="release"; scripts/run_tests.sh anonymous_vectors=2 -- cargo test --locked --profile "${CARGO_PROFILE}" --features test-vectors --test anonymous_vectors )
 )
 
-step "ci.yml / test: Pinned peer and the anonymous handshake over messages [profile=release]"
+step "ci.yml / test: Pinned peer, peer kind and the anonymous handshake over messages [profile=release]"
 (
   gh_step ci.yml.test
-( export CARGO_TERM_COLOR="always" MIN_PASSED="72" MIN_PASSED_ASYNC="88" CARGO_PROFILE="release"; scripts/run_tests.sh pinned_peer=15 -- cargo test --locked --profile "${CARGO_PROFILE}" --test pinned_peer )
+( export CARGO_TERM_COLOR="always" MIN_PASSED="72" MIN_PASSED_ASYNC="88" CARGO_PROFILE="release"; scripts/run_tests.sh pinned_peer=15,peer_kind=8 -- cargo test --locked --profile "${CARGO_PROFILE}" --test pinned_peer --test peer_kind )
 )
 
 step "ci.yml / float-environment: Float environment (debug and release)"
