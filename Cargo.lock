@@ -53,7 +53,7 @@ dependencies = [
 [[package]]
 name = "alice-crypto"
 version = "0.7.0"
-source = "git+https://github.com/ext-sakamoro/ALICE-Crypto?branch=main#5f7eb8ff773a2ee859d2ee025dd0dbdd1b61d577"
+source = "git+https://github.com/ext-sakamoro/ALICE-Crypto?branch=main#5ab21f5da59530b6b0cb90728c608b79fb5ca8aa"
 dependencies = [
  "aes-gcm",
  "argon2",
@@ -429,8 +429,10 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ff2abc00be7fca6ebc474524697ae276ad847ad0a6b3faa4bcb027e9a4614ad0"
 dependencies = [
  "cfg-if",
+ "js-sys",
  "libc",
  "wasi",
+ "wasm-bindgen",
 ]
 
 [[package]]
