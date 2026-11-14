@@ -32,7 +32,7 @@ use crate::clock::{Clock, DefaultClock};
 use crate::noise::nk::NkHandshakeState;
 use crate::noise::suspend::{self, Phase};
 use crate::noise::{
-    Keypair, NoiseError, ResumeError, Resumed, SuspendKey, SuspendedTransport, Transport,
+    ChannelId, Keypair, NoiseError, ResumeError, Resumed, SuspendKey, SuspendedTransport, Transport,
 };
 use crate::{
     dial_key, read_frame, read_frame_before, read_frame_within, write_frame, ChannelError,
@@ -153,11 +153,12 @@ impl Initiate {
         Ok(Self::start(rs)?)
     }
 
-    /// As [`Self::start`] with a fixed ephemeral key, for test vectors only (a reused ephemeral key voids the
+    /// As [`Self::start`] with a fixed ephemeral key, for test vectors only (feature `test-vectors`, off by default) (a reused ephemeral key voids the
     /// protocol's guarantees)
     ///
     /// # Errors
     /// As [`Self::start`]
+    #[cfg(feature = "test-vectors")]
     pub fn start_with_ephemeral(
         responder_static: [u8; 32],
         ephemeral: Keypair,
@@ -222,7 +223,8 @@ impl Respond {
         }
     }
 
-    /// As [`Self::new`] with a fixed ephemeral key, for test vectors only
+    /// As [`Self::new`] with a fixed ephemeral key, for test vectors only (feature `test-vectors`, off by default)
+    #[cfg(feature = "test-vectors")]
     #[must_use]
     pub fn with_ephemeral(static_key: Keypair, ephemeral: Keypair) -> Self {
         Self {
@@ -283,6 +285,12 @@ impl AwaitConfirmation {
         self.transport.handshake_hash()
     }
 
+    /// The id of this channel (as [`Transport::channel_id`]), for the host to store at handshake time
+    #[must_use]
+    pub fn channel_id(&self) -> ChannelId {
+        self.transport.channel_id()
+    }
+
     /// Seal the waiting state under the host key (as [`Transport::suspend`], marked as waiting for the key
     /// confirmation)
     ///
@@ -300,9 +308,10 @@ impl AwaitConfirmation {
         suspended: &SuspendedTransport,
         key: &SuspendKey,
         floor: u64,
+        channel: ChannelId,
     ) -> Result<Resumed<Self>, ResumeError> {
         Ok(
-            suspend::open(suspended, Phase::AwaitingConfirmation, key, floor)?
+            suspend::open(suspended, Phase::AwaitingConfirmation, key, floor, channel)?
                 .map(|transport| Self { transport }),
         )
     }

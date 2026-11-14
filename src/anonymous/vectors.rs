@@ -1,7 +1,8 @@
 //! The bytes of an anonymous channel with fixed keys, recorded before the stream channel was rebuilt on the
 //! sans-I/O state machines ([`super::Initiate`], [`super::Respond`]): the recorded transcript comes from the
 //! blocking implementation as it stood (each side's ephemeral key fixed through a test-only hook in the NK
-//! handshake), so the stream channel and the state machines are both held to the same wire bytes.
+//! handshake). The stream channel is held to it here; the state machines are held to the same bytes in
+//! `tests/anonymous_vectors.rs` (feature `test-vectors`).
 
 use std::collections::BTreeMap;
 use std::io::{Read, Write};
@@ -26,26 +27,31 @@ const NOW: u64 = 1_800_000_100;
 const TIMEOUT: Duration = Duration::from_secs(10);
 
 /// The responder's Noise static secret and the two ephemeral secrets of the recorded run
-pub(super) const RESPONDER_STATIC: [u8; 32] = [0x07; 32];
-pub(super) const INITIATOR_EPHEMERAL: [u8; 32] = [0x11; 32];
-pub(super) const RESPONDER_EPHEMERAL: [u8; 32] = [0x22; 32];
+const RESPONDER_STATIC: [u8; 32] = [0x07; 32];
+const INITIATOR_EPHEMERAL: [u8; 32] = [0x11; 32];
+const RESPONDER_EPHEMERAL: [u8; 32] = [0x22; 32];
 
-/// The initiator's stream, both directions in the order it wrote and read them: frame(first message),
-/// frame(responder's message), frame(key confirmation), frame(seal("ping")), frame(seal("pong")); recorded
-/// from the blocking implementation at e7de79f
-pub(super) const RECORDED_TRANSCRIPT: &str = concat!(
-    "00307b4e909bbe7ffe44c465a220037d608ee35897d31ef972f07f74892cb0f73f133ff3385aa24ecb59ce21f92c751ab272",
-    "00300faa684ed28867b97f4a6a2dee5df8ce974e76b7018e3f22a1c4cf2678570f208eb67227864f582ff5f6ec7b265fa2bf",
-    "00104a0f6b5890dfdd2b8835166ce1c996fe",
-    "00143d05b65583a06c15fa16cec7152b955ecb322013",
-    "0014c903829f3d6f7ce4af7f23595181a3fd66e2f7d7",
-);
+/// The recorded run (`tests/data/anonymous_recorded.txt`, shared with `tests/anonymous_vectors.rs`): the
+/// initiator's stream, both directions in the order it wrote and read them, recorded from the blocking
+/// implementation at e7de79f, and the handshake hash
+const RECORDED: &str = include_str!("../../tests/data/anonymous_recorded.txt");
 
-/// The handshake hash of the recorded run
-pub(super) const RECORDED_HANDSHAKE_HASH: &str =
-    "9ab3284d75309cdb46e9e6663bac4df8c662bec04671c70413d679edbd83db4e";
+fn recorded(field: &str) -> &'static str {
+    RECORDED
+        .lines()
+        .find_map(|l| l.strip_prefix(field)?.strip_prefix(' '))
+        .unwrap_or_else(|| panic!("no {field} line"))
+}
 
-pub(super) fn hex(bytes: &[u8]) -> String {
+fn recorded_transcript() -> &'static str {
+    recorded("transcript")
+}
+
+fn recorded_hash() -> &'static str {
+    recorded("hash")
+}
+
+fn hex(bytes: &[u8]) -> String {
     use std::fmt::Write as _;
     bytes.iter().fold(String::new(), |mut s, b| {
         let _ = write!(s, "{b:02x}");
@@ -53,7 +59,7 @@ pub(super) fn hex(bytes: &[u8]) -> String {
     })
 }
 
-pub(super) fn unhex(s: &str) -> Vec<u8> {
+fn unhex(s: &str) -> Vec<u8> {
     (0..s.len())
         .step_by(2)
         .map(|i| u8::from_str_radix(&s[i..i + 2], 16).unwrap())
@@ -61,7 +67,7 @@ pub(super) fn unhex(s: &str) -> Vec<u8> {
 }
 
 /// The frames of a stream transcript (a big-endian u16 length, then that many bytes)
-pub(super) fn frames(mut t: &[u8]) -> Vec<Vec<u8>> {
+fn frames(mut t: &[u8]) -> Vec<Vec<u8>> {
     let mut out = Vec::new();
     while t.len() >= 2 {
         let n = usize::from(u16::from_be_bytes([t[0], t[1]]));
@@ -174,12 +180,12 @@ fn the_stream_channel_writes_the_recorded_bytes() {
     assert_eq!(hi, hr);
     let got = hex(&transcript);
     assert!(
-        !RECORDED_TRANSCRIPT.is_empty(),
+        !recorded_transcript().is_empty(),
         "no recorded transcript; this run gives\nTRANSCRIPT {got}\nHASH {}",
         hex(&hi)
     );
-    assert_eq!(got, RECORDED_TRANSCRIPT);
-    assert_eq!(hex(&hi), RECORDED_HANDSHAKE_HASH);
+    assert_eq!(got, recorded_transcript());
+    assert_eq!(hex(&hi), recorded_hash());
     let f = frames(&transcript);
     assert_eq!(
         f.iter().map(Vec::len).collect::<Vec<_>>(),
@@ -226,35 +232,8 @@ fn the_recorded_first_message_is_the_documented_nk_message() {
         rs,
         Keypair::from_secret(INITIATOR_EPHEMERAL),
     );
-    let f = frames(&unhex(RECORDED_TRANSCRIPT));
+    let f = frames(&unhex(recorded_transcript()));
     assert_eq!(hs.write_message(&[]).unwrap(), f[0]);
     assert!(hs.read_message(&f[1]).unwrap().is_empty());
-    assert_eq!(hex(&hs.handshake_hash()), RECORDED_HANDSHAKE_HASH);
-}
-
-#[test]
-fn the_state_machines_write_the_recorded_bytes() {
-    let f = frames(&unhex(RECORDED_TRANSCRIPT));
-    let rs = Keypair::from_secret(RESPONDER_STATIC).public();
-    let (init, first) =
-        super::Initiate::start_with_ephemeral(rs, Keypair::from_secret(INITIATOR_EPHEMERAL))
-            .unwrap();
-    assert_eq!(first, f[0], "first message");
-    let resp = super::Respond::with_ephemeral(
-        Keypair::from_secret(RESPONDER_STATIC),
-        Keypair::from_secret(RESPONDER_EPHEMERAL),
-    );
-    let (pending, response) = resp.respond(&first).unwrap();
-    assert_eq!(response, f[1], "response");
-    let (mut ti, confirmation) = init.finish(&response).unwrap();
-    assert_eq!(confirmation, f[2], "key confirmation");
-    let mut tr = pending.confirm(&confirmation).unwrap();
-    let to_responder = ti.send(b"ping").unwrap();
-    assert_eq!(to_responder, f[3]);
-    assert_eq!(tr.recv(&to_responder).unwrap(), b"ping");
-    let to_initiator = tr.send(b"pong").unwrap();
-    assert_eq!(to_initiator, f[4]);
-    assert_eq!(ti.recv(&to_initiator).unwrap(), b"pong");
-    assert_eq!(hex(&ti.handshake_hash()), RECORDED_HANDSHAKE_HASH);
-    assert_eq!(tr.handshake_hash(), ti.handshake_hash());
+    assert_eq!(hex(&hs.handshake_hash()), recorded_hash());
 }

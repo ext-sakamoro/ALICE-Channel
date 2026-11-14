@@ -328,12 +328,6 @@ reason = "the first NK handshake message to a certified responder (an ephemeral 
 
 [[function]]
 file = "src/anonymous.rs"
-name = "start_with_ephemeral"
-class = "handshake message"
-reason = "as start with a given ephemeral key (the test vectors)"
-
-[[function]]
-file = "src/anonymous.rs"
 name = "finish"
 class = "handshake message"
 reason = "the responder's NK handshake message in, the key confirmation (an empty sealed transport message) out"
@@ -354,10 +348,16 @@ reason = "the initiator's key confirmation, an empty message sealed with the cha
 file = "src/noise/suspend.rs"
 name = "from_bytes"
 class = "key material"
-reason = "a host key (32 bytes), or a suspended transport: transport keys, nonce counters and handshake hash sealed with ChaCha20-Poly1305 under the host key; no Law-bearing value"
+reason = "a host key (32 bytes), a channel id (the first 16 bytes of a handshake hash), or a suspended transport: transport keys, nonce counters and handshake hash sealed with ChaCha20-Poly1305 under the host key; no Law-bearing value"
 
 [[function]]
 file = "src/noise/suspend.rs"
 name = "as_bytes"
 class = "key material"
-reason = "a suspended transport: transport keys, nonce counters and handshake hash sealed with ChaCha20-Poly1305 under the host key; no Law-bearing value"
+reason = "a channel id (the first 16 bytes of a handshake hash), or a suspended transport: transport keys, nonce counters and handshake hash sealed with ChaCha20-Poly1305 under the host key; no Law-bearing value"
+
+[[function]]
+file = "src/noise/suspend.rs"
+name = "of_handshake_hash"
+class = "handshake hash"
+reason = "the Noise handshake hash in, its first 16 bytes as the channel id out; a transcript digest, no Law-bearing value"

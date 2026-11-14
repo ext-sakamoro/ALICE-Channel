@@ -20,6 +20,10 @@ tokio = { version = "1", default-features = false, features = ["io-util", "time"
 
 [features]
 async = ["dep:tokio"]
+# the anonymous handshake's constructors with a fixed ephemeral key (`Initiate::start_with_ephemeral`,
+# `Respond::with_ephemeral`), for the recorded test vectors only: a reused ephemeral key voids the handshake's
+# guarantees, so no default build and no other feature reaches them (scripts/test_vectors_gated.py)
+test-vectors = []
 
 [dev-dependencies]
 serde_json = "1"

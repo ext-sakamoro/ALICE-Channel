@@ -513,6 +513,8 @@ fn an_anonymous_handshake_survives_evictions_of_the_responder() {
 
     // callback 1: the first message comes, the response leaves, the state is suspended
     let (pending, response) = Respond::new(responder_static).respond(&first).unwrap();
+    // the host stores the channel id beside every copy of this channel
+    let channel = pending.channel_id();
     let mut stored = pending.suspend(&host_key).unwrap().as_bytes().to_vec();
     let mut floor = 0;
 
@@ -521,17 +523,19 @@ fn an_anonymous_handshake_survives_evictions_of_the_responder() {
 
     // callback 2: the key confirmation, then the first request
     let copy = SuspendedTransport::from_bytes(&stored).unwrap();
-    let resumed = AwaitConfirmation::resume(&copy, &host_key, floor).unwrap();
+    let resumed = AwaitConfirmation::resume(&copy, &host_key, floor, channel).unwrap();
     floor = resumed.next_floor();
     let server = resumed.floor_persisted().confirm(&confirmation).unwrap();
     assert_eq!(server.handshake_hash(), client.handshake_hash());
+    assert_eq!(server.channel_id(), channel);
     stored = server.suspend(&host_key).unwrap().as_bytes().to_vec();
 
     // callbacks 3..: one request and one reply each, with an eviction between
     for round in 0..3u8 {
         let request = client.send(&[round; 8]).unwrap();
         let copy = SuspendedTransport::from_bytes(&stored).unwrap();
-        let resumed = alice_channel::noise::Transport::resume(&copy, &host_key, floor).unwrap();
+        let resumed =
+            alice_channel::noise::Transport::resume(&copy, &host_key, floor, channel).unwrap();
         floor = resumed.next_floor();
         let mut server = resumed.floor_persisted();
         assert_eq!(server.recv(&request).unwrap(), [round; 8]);
@@ -539,7 +543,7 @@ fn an_anonymous_handshake_survives_evictions_of_the_responder() {
         stored = server.suspend(&host_key).unwrap().as_bytes().to_vec();
         assert_eq!(client.recv(&reply).unwrap(), [round ^ 0xff; 5]);
         // the copy before this callback is refused now
-        assert!(alice_channel::noise::Transport::resume(&copy, &host_key, floor).is_err());
+        assert!(alice_channel::noise::Transport::resume(&copy, &host_key, floor, channel).is_err());
     }
     assert_eq!(floor, 4);
 }

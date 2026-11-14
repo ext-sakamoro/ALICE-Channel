@@ -647,6 +647,19 @@ relint
 ( export CARGO_TERM_COLOR="always"; cargo clippy --locked --all-targets --features async -- -D warnings )
 )
 
+step "ci.yml / clippy: Clippy (feature test-vectors)"
+(
+  gh_step ci.yml.clippy
+relint
+( export CARGO_TERM_COLOR="always"; cargo clippy --locked --all-targets --features test-vectors -- -D warnings )
+)
+
+step "ci.yml / clippy: Fixed-ephemeral constructors only with test-vectors (manifest and compile checks)"
+(
+  gh_step ci.yml.clippy
+( export CARGO_TERM_COLOR="always"; python3 scripts/test_vectors_gated.py )
+)
+
 step "ci.yml / clippy: Law boundary scan (tests, then the library's rustdoc JSON)"
 (
   gh_step ci.yml.clippy
@@ -990,6 +1003,12 @@ step "ci.yml / test: Law tests (semantics goldens and identifier, Noise vectors)
 ( export CARGO_TERM_COLOR="always" MIN_PASSED="72" MIN_PASSED_ASYNC="88" CARGO_PROFILE="test"; scripts/run_tests.sh semantics_golden=4,channel_semantics_id=8,noise_vectors=12 -- cargo test --locked --profile "${CARGO_PROFILE}" --test semantics_golden --test channel_semantics_id --test noise_vectors )
 )
 
+step "ci.yml / test: Anonymous handshake vectors (feature test-vectors) [profile=debug]"
+(
+  gh_step ci.yml.test
+( export CARGO_TERM_COLOR="always" MIN_PASSED="72" MIN_PASSED_ASYNC="88" CARGO_PROFILE="test"; scripts/run_tests.sh anonymous_vectors=2 -- cargo test --locked --profile "${CARGO_PROFILE}" --features test-vectors --test anonymous_vectors )
+)
+
 step "ci.yml / test: Test (lib, integration, doctests) [profile=release]"
 (
   gh_step ci.yml.test
@@ -1039,6 +1058,12 @@ step "ci.yml / test: Law tests (semantics goldens and identifier, Noise vectors)
 (
   gh_step ci.yml.test
 ( export CARGO_TERM_COLOR="always" MIN_PASSED="72" MIN_PASSED_ASYNC="88" CARGO_PROFILE="release"; scripts/run_tests.sh semantics_golden=4,channel_semantics_id=8,noise_vectors=12 -- cargo test --locked --profile "${CARGO_PROFILE}" --test semantics_golden --test channel_semantics_id --test noise_vectors )
+)
+
+step "ci.yml / test: Anonymous handshake vectors (feature test-vectors) [profile=release]"
+(
+  gh_step ci.yml.test
+( export CARGO_TERM_COLOR="always" MIN_PASSED="72" MIN_PASSED_ASYNC="88" CARGO_PROFILE="release"; scripts/run_tests.sh anonymous_vectors=2 -- cargo test --locked --profile "${CARGO_PROFILE}" --features test-vectors --test anonymous_vectors )
 )
 
 step "ci.yml / float-environment: Float environment (debug and release)"

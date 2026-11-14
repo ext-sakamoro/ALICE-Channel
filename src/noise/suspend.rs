@@ -8,16 +8,20 @@
 //! without the host key, or sealed under another host key is refused, and the keys cannot be read from
 //! where the host keeps the copy.
 //!
-//! # Layout (version 1, [`SUSPENDED_LEN`] = 150 bytes)
+//! # Layout (version 2, [`SUSPENDED_LEN`] = 166 bytes)
 //!
 //! ```text
-//! header (22 bytes, the associated data):
-//!   version u8 (= 1) | phase u8 (0 = transport, 1 = awaiting the key confirmation)
+//! header (38 bytes, the associated data):
+//!   version u8 (= 2) | phase u8 (0 = transport, 1 = awaiting the key confirmation)
+//!   | channel id [u8; 16] (the first 16 bytes of the handshake hash, [`ChannelId`])
 //!   | epoch u64 LE | nonce [u8; 12]
 //! sealed (112 + 16 bytes):
 //!   send key [u8; 32] | send nonce u64 LE | receive key [u8; 32] | receive nonce u64 LE | handshake hash [u8; 32]
 //!   | tag [u8; 16]
 //! ```
+//!
+//! Version 1 (150 bytes, no channel id) is refused with [`ResumeError::Version`]: the version byte is read
+//! before the length, so an older copy is named as such.
 //!
 //! # Nonces: the host's rule
 //!
@@ -30,11 +34,22 @@
 //! message is acted on**; only then may it call [`Resumed::floor_persisted`] and use the transport. The next
 //! suspension carries the new epoch, so it is accepted at the new floor, and every older copy is refused.
 //! A host evicted after a message left but before it stored the next copy finds only an older copy below
-//! its floor: the channel is lost (a new handshake is needed), but no nonce is reused. A copy that is used
-//! anyway, in breach of the rule, is detected by the peer: a message sealed under a nonce the peer has
-//! already passed does not open there.
+//! its floor: the channel is lost (a new handshake is needed), but no nonce is reused.
 //!
-//! The floor belongs to one channel (one handshake hash): a new handshake starts again at 0.
+//! **Persisting the floor first is the only protection.** A copy used anyway, in breach of the rule, seals
+//! under a (key, nonce) pair that has already been used: anyone who saw both ciphertexts has the XOR of the
+//! two plaintexts, and Poly1305 forgeries under that key become possible. The peer refuses the second message
+//! (its nonce is behind the peer's counter), but that only detects the breach after the fact; it does not undo
+//! the leak.
+//!
+//! # Channels
+//!
+//! The floor belongs to one channel, and a new handshake starts again at 0, so a floor alone cannot tell an
+//! earlier channel's copy (left in a storage slot the host reuses) from a fresh one. Every copy therefore
+//! names its channel in the authenticated header ([`ChannelId`], from [`Transport::channel_id`] or
+//! [`crate::AwaitConfirmation::channel_id`]); the host stores the id when the handshake completes and passes
+//! it to `resume`, which refuses a copy of another channel ([`ResumeError::OtherChannel`]). An edited id
+//! breaks the tag ([`ResumeError::Authentication`]).
 
 use alice_crypto::chacha20poly1305_ietf as aead;
 use alice_crypto::{random, sha256};
@@ -43,7 +58,7 @@ use zeroize::{Zeroize, Zeroizing};
 use super::{CipherState, NoiseError, Transport, TransportReceiver, TransportSender};
 
 /// The version byte of the layout this crate writes and reads
-pub const SUSPENDED_VERSION: u8 = 1;
+pub const SUSPENDED_VERSION: u8 = 2;
 
 /// The length of a suspended transport, in bytes
 pub const SUSPENDED_LEN: usize = HEADER_LEN + PLAIN_LEN + aead::TAG_SIZE;
@@ -51,7 +66,10 @@ pub const SUSPENDED_LEN: usize = HEADER_LEN + PLAIN_LEN + aead::TAG_SIZE;
 /// The label of the key derivation: the sealing key is `HMAC-SHA256(host key, SUSPEND_KEY_LABEL)`
 pub const SUSPEND_KEY_LABEL: &[u8] = b"alice-channel suspended transport v1";
 
-const HEADER_LEN: usize = 1 + 1 + 8 + aead::NONCE_SIZE;
+const HEADER_LEN: usize = 1 + 1 + CHANNEL_ID_LEN + 8 + aead::NONCE_SIZE;
+const ID_AT: core::ops::Range<usize> = 2..2 + CHANNEL_ID_LEN;
+const EPOCH_AT: core::ops::Range<usize> = ID_AT.end..ID_AT.end + 8;
+const NONCE_AT: core::ops::Range<usize> = EPOCH_AT.end..HEADER_LEN;
 const PLAIN_LEN: usize = 32 + 8 + 32 + 8 + 32;
 
 /// What a suspended copy holds: an open transport, or a responder's transport still waiting for the
@@ -88,6 +106,14 @@ pub enum ResumeError {
     },
     /// The copy's epoch is the last one: it cannot be resumed again
     EpochExhausted,
+    /// The copy belongs to another channel than the one the host expected (a copy left from an earlier
+    /// handshake in the same storage slot)
+    OtherChannel {
+        /// the channel the host expected
+        expected: ChannelId,
+        /// the channel the copy names
+        got: ChannelId,
+    },
 }
 
 impl core::fmt::Display for ResumeError {
@@ -104,11 +130,67 @@ impl core::fmt::Display for ResumeError {
                 "the suspended transport is older (epoch {epoch}) than the floor {floor}"
             ),
             Self::EpochExhausted => f.write_str("the suspended transport's epoch is spent"),
+            Self::OtherChannel { expected, got } => write!(
+                f,
+                "the suspended transport belongs to channel {got}, not {expected}"
+            ),
         }
     }
 }
 
 impl std::error::Error for ResumeError {}
+
+/// The identity of one channel: the first [`CHANNEL_ID_LEN`] bytes of its handshake hash
+///
+/// The handshake hash is a SHA-256 transcript that includes both sides' fresh ephemeral keys, so no one can
+/// choose it. 16 bytes (128 bits) make two channels of one host share an id only after about 2^64 channels
+/// (the birthday bound), and forcing a match with a given id costs 2^128 handshakes, the strength of the
+/// AEAD's own 128-bit tag. It is not secret: a host may store it beside the copy, in clear
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct ChannelId([u8; CHANNEL_ID_LEN]);
+
+/// The length of a [`ChannelId`], in bytes
+pub const CHANNEL_ID_LEN: usize = 16;
+
+impl ChannelId {
+    /// The id of the channel whose handshake hash is `handshake_hash`
+    #[must_use]
+    pub fn of_handshake_hash(handshake_hash: &[u8; 32]) -> Self {
+        let mut id = [0u8; CHANNEL_ID_LEN];
+        id.copy_from_slice(&handshake_hash[..CHANNEL_ID_LEN]);
+        Self(id)
+    }
+
+    /// An id the host stored ([`Self::as_bytes`])
+    #[must_use]
+    pub const fn from_bytes(bytes: [u8; CHANNEL_ID_LEN]) -> Self {
+        Self(bytes)
+    }
+
+    /// The bytes to store
+    #[must_use]
+    pub const fn as_bytes(&self) -> &[u8; CHANNEL_ID_LEN] {
+        &self.0
+    }
+}
+
+impl From<[u8; CHANNEL_ID_LEN]> for ChannelId {
+    fn from(bytes: [u8; CHANNEL_ID_LEN]) -> Self {
+        Self(bytes)
+    }
+}
+
+impl AsRef<[u8]> for ChannelId {
+    fn as_ref(&self) -> &[u8] {
+        &self.0
+    }
+}
+
+impl core::fmt::Display for ChannelId {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        self.0.iter().try_for_each(|b| write!(f, "{b:02x}"))
+    }
+}
 
 /// The host's key for sealing suspended transports (zeroed on drop; no equality and no display, so it is
 /// neither compared in variable time nor printed)
@@ -155,14 +237,17 @@ impl SuspendedTransport {
     /// [`ResumeError::Length`], [`ResumeError::Version`]
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, ResumeError> {
         let mut copy = Scrub([0u8; SUSPENDED_LEN]);
+        // the version first: a copy of another layout is named as such, whatever its length
+        if let Some(&v) = bytes.first() {
+            if v != SUSPENDED_VERSION {
+                return Err(ResumeError::Version(v));
+            }
+        }
         if bytes.len() != SUSPENDED_LEN {
             return Err(ResumeError::Length {
                 expected: SUSPENDED_LEN,
                 got: bytes.len(),
             });
-        }
-        if bytes[0] != SUSPENDED_VERSION {
-            return Err(ResumeError::Version(bytes[0]));
         }
         copy.0.copy_from_slice(bytes);
         Ok(Self { bytes: copy })
@@ -174,11 +259,20 @@ impl SuspendedTransport {
         &self.bytes.0
     }
 
+    /// The channel the header names (not authenticated until the copy is resumed): for a host that finds
+    /// its stored id by the copy, the id still has to match what it expects
+    #[must_use]
+    pub fn channel_id(&self) -> ChannelId {
+        let mut id = [0u8; CHANNEL_ID_LEN];
+        id.copy_from_slice(&self.bytes.0[ID_AT]);
+        ChannelId(id)
+    }
+
     /// The epoch the header names (not authenticated until the copy is resumed)
     #[must_use]
     pub fn epoch(&self) -> u64 {
         let mut e = [0u8; 8];
-        e.copy_from_slice(&self.bytes.0[2..10]);
+        e.copy_from_slice(&self.bytes.0[EPOCH_AT]);
         u64::from_le_bytes(e)
     }
 }
@@ -221,6 +315,13 @@ impl<T> Resumed<T> {
 }
 
 impl Transport {
+    /// The id of this channel, for the host to store beside its suspended copies and pass to
+    /// [`Self::resume`]
+    #[must_use]
+    pub fn channel_id(&self) -> ChannelId {
+        ChannelId::of_handshake_hash(&self.sender.handshake_hash)
+    }
+
     /// Seal this transport under the host key, for a host that is about to be evicted
     ///
     /// # Errors
@@ -229,18 +330,19 @@ impl Transport {
         seal(self, Phase::Transport, key)
     }
 
-    /// Open a suspended transport, refusing a copy below the host's `floor` for this channel (see the module
-    /// documentation for the rule the host follows)
+    /// Open a suspended transport of the channel `channel`, refusing a copy below the host's `floor` for it
+    /// (see the module documentation for the rule the host follows)
     ///
     /// # Errors
-    /// [`ResumeError::Authentication`], [`ResumeError::Phase`], [`ResumeError::Stale`],
-    /// [`ResumeError::EpochExhausted`]
+    /// [`ResumeError::Authentication`], [`ResumeError::Phase`], [`ResumeError::OtherChannel`],
+    /// [`ResumeError::Stale`], [`ResumeError::EpochExhausted`]
     pub fn resume(
         suspended: &SuspendedTransport,
         key: &SuspendKey,
         floor: u64,
+        channel: ChannelId,
     ) -> Result<Resumed<Self>, ResumeError> {
-        open(suspended, Phase::Transport, key, floor)
+        open(suspended, Phase::Transport, key, floor, channel)
     }
 }
 
@@ -265,10 +367,11 @@ pub(crate) fn seal(
     let mut out = Scrub([0u8; SUSPENDED_LEN]);
     out.0[0] = SUSPENDED_VERSION;
     out.0[1] = phase as u8;
-    out.0[2..10].copy_from_slice(&transport.epoch.to_le_bytes());
-    random::fill(&mut out.0[10..HEADER_LEN]).map_err(|_| NoiseError::Randomness)?;
+    out.0[ID_AT].copy_from_slice(transport.channel_id().as_bytes());
+    out.0[EPOCH_AT].copy_from_slice(&transport.epoch.to_le_bytes());
+    random::fill(&mut out.0[NONCE_AT]).map_err(|_| NoiseError::Randomness)?;
     let mut nonce = [0u8; aead::NONCE_SIZE];
-    nonce.copy_from_slice(&out.0[10..HEADER_LEN]);
+    nonce.copy_from_slice(&out.0[NONCE_AT]);
     let sealed = aead::seal(&key.sealing_key(), &nonce, &out.0[..HEADER_LEN], &plain.0);
     out.0[HEADER_LEN..].copy_from_slice(&sealed);
     // the transport's keys are zeroed as it drops
@@ -282,11 +385,12 @@ pub(crate) fn open(
     phase: Phase,
     key: &SuspendKey,
     floor: u64,
+    channel: ChannelId,
 ) -> Result<Resumed<Transport>, ResumeError> {
     let bytes = &suspended.bytes.0;
     let (header, sealed) = bytes.split_at(HEADER_LEN);
     let mut nonce = [0u8; aead::NONCE_SIZE];
-    nonce.copy_from_slice(&header[10..HEADER_LEN]);
+    nonce.copy_from_slice(&header[NONCE_AT]);
     let mut opened = aead::open(&key.sealing_key(), &nonce, header, sealed)
         .map_err(|_| ResumeError::Authentication)?;
     let mut plain = Scrub([0u8; PLAIN_LEN]);
@@ -304,6 +408,14 @@ pub(crate) fn open(
     }
     if header[1] != phase as u8 {
         return Err(ResumeError::Phase(header[1]));
+    }
+    // the header is authenticated by now: its channel id is the one the copy was sealed with
+    let got = suspended.channel_id();
+    if got != channel {
+        return Err(ResumeError::OtherChannel {
+            expected: channel,
+            got,
+        });
     }
     let epoch = suspended.epoch();
     if epoch < floor {
@@ -404,8 +516,9 @@ mod tests {
         a.recv(&b.send(b"y").unwrap()).unwrap();
         let before = keys(&a);
         let key = SuspendKey::from_bytes([9; 32]);
+        let id = a.channel_id();
         let s = a.suspend(&key).unwrap();
-        let r = Transport::resume(&s, &key, 0).unwrap();
+        let r = Transport::resume(&s, &key, 0, id).unwrap();
         let a = r.floor_persisted();
         assert_eq!(a.sender.cipher.nonce, 4);
         assert_eq!(a.receiver.cipher.nonce, 1);
@@ -420,10 +533,13 @@ mod tests {
         let (a, _) = pair();
         let [send, recv] = keys(&a);
         let key = SuspendKey::from_bytes([9; 32]);
+        let id = a.channel_id();
         let _ = probe::take();
         let kept = a.suspend(&key).unwrap().as_bytes().to_vec();
         let s = SuspendedTransport::from_bytes(&kept).unwrap();
-        let resumed = Transport::resume(&s, &key, 0).unwrap().floor_persisted();
+        let resumed = Transport::resume(&s, &key, 0, id)
+            .unwrap()
+            .floor_persisted();
         drop(s);
         drop(resumed);
         let seen = probe::take();

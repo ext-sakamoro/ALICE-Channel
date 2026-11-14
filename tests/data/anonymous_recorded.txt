@@ -1,0 +1,7 @@
+# An anonymous channel run with fixed keys, recorded from the blocking implementation at e7de79f (before it
+# was rebuilt on the sans-I/O state machines). Responder static secret [0x07; 32], initiator ephemeral
+# [0x11; 32], responder ephemeral [0x22; 32], prologue "alice-channel anonymous v1".
+# transcript: the initiator's stream, both directions in order: frame(first message), frame(response),
+# frame(key confirmation), frame(seal("ping")), frame(seal("pong")); each frame a big-endian u16 length
+transcript 00307b4e909bbe7ffe44c465a220037d608ee35897d31ef972f07f74892cb0f73f133ff3385aa24ecb59ce21f92c751ab27200300faa684ed28867b97f4a6a2dee5df8ce974e76b7018e3f22a1c4cf2678570f208eb67227864f582ff5f6ec7b265fa2bf00104a0f6b5890dfdd2b8835166ce1c996fe00143d05b65583a06c15fa16cec7152b955ecb3220130014c903829f3d6f7ce4af7f23595181a3fd66e2f7d7
+hash 9ab3284d75309cdb46e9e6663bac4df8c662bec04671c70413d679edbd83db4e

@@ -25,7 +25,7 @@ use zeroize::{Zeroize, Zeroizing};
 pub mod nk;
 pub mod suspend;
 
-pub use suspend::{ResumeError, Resumed, SuspendKey, SuspendedTransport};
+pub use suspend::{ChannelId, ResumeError, Resumed, SuspendKey, SuspendedTransport};
 
 /// The protocol name; it is exactly 32 bytes, so it is the initial handshake hash as it stands
 pub const PROTOCOL_NAME: &[u8; 32] = b"Noise_IK_25519_ChaChaPoly_SHA256";

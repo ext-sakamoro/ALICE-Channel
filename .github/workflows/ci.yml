@@ -53,6 +53,14 @@ jobs:
         run: cargo clippy --locked --all-targets -- -D warnings
       - name: Clippy (feature async)
         run: cargo clippy --locked --all-targets --features async -- -D warnings
+      # the anonymous handshake's fixed-ephemeral constructors and tests/anonymous_vectors.rs exist only with
+      # the feature test-vectors (off by default)
+      - name: Clippy (feature test-vectors)
+        run: cargo clippy --locked --all-targets --features test-vectors -- -D warnings
+      # no default build and no other feature reaches the fixed-ephemeral constructors: the manifest, then
+      # E0599 for a dependent with the default features and with async, and a control with test-vectors
+      - name: Fixed-ephemeral constructors only with test-vectors (manifest and compile checks)
+        run: python3 scripts/test_vectors_gated.py
       # ALICE-Law G7 / G8 / G9 scope: no Law-bearing value crosses a byte boundary (every
       # public function carrying bytes is in scripts/law_boundary_table.toml, and the crate
       # has no Law-bearing module); read from the rustdoc JSON of the library
@@ -166,6 +174,11 @@ jobs:
       # scripts/run_tests.sh fails a binary that ran fewer tests than named
       - name: Law tests (semantics goldens and identifier, Noise vectors)
         run: scripts/run_tests.sh semantics_golden=4,channel_semantics_id=8,noise_vectors=12 -- cargo test --locked --profile "${CARGO_PROFILE}" --test semantics_golden --test channel_semantics_id --test noise_vectors
+
+      # the sans-I/O anonymous handshake against the run recorded from the blocking channel (the feature
+      # test-vectors gives the fixed-ephemeral constructors); fewer than 2 tests run (0 included) fails
+      - name: Anonymous handshake vectors (feature test-vectors)
+        run: scripts/run_tests.sh anonymous_vectors=2 -- cargo test --locked --profile "${CARGO_PROFILE}" --features test-vectors --test anonymous_vectors
 
       # ALICE-Law G11: ALICE-Law's own self-check at the pinned revision (table, rows, shared copies, own copies
       # at their targets, manifest and its anchors), on every leg of the matrix
