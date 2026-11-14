@@ -6,7 +6,7 @@
 # Run `--quick` before every push.
 #
 # usage: scripts/preflight.sh [--quick]   (--quick skips the test / bench suites)
-# generator rev 5ece2bc3121e9bf65aa0bb39b5ae63c962b914db
+# generator rev a435b0d5d7655af2500185f73eb99726c67cee8e
 set -euo pipefail
 cd "$(dirname "$0")/.."
 # --- heavy slot (begin) ---
@@ -582,6 +582,8 @@ need() { command -v "$1" >/dev/null 2>&1 || { echo "missing tool: $1 ($2)" >&2; 
 has_toolchain() { grep -q "^$1" <<<"$(rustup toolchain list)"; }
 
 # Steps CI runs that this file cannot reproduce locally (they can only fail remotely):
+#   - ci.yml:test:ALICE-Law G11 self-check (the four G11 checks at the pinned revision) [profile=debug] (no cargo / grep)
+#   - ci.yml:test:ALICE-Law G11 self-check (the four G11 checks at the pinned revision) [profile=release] (no cargo / grep)
 #   - ci.yml:wasm-js:Install the pinned toolchain (no cargo / grep)
 #   - ci.yml:wasm-js:wasm-bindgen version from Cargo.lock (no cargo / grep)
 #   - ci.yml:wasm-js:Install wasm-bindgen-cli (its `if:` runs on what happened earlier on the runner)
@@ -941,7 +943,7 @@ step "ci.yml / test: Test (lib, integration, doctests) [profile=debug]"
 (
   gh_step ci.yml.test
 (
-  export CARGO_TERM_COLOR="always" MIN_PASSED="72" MIN_PASSED_ASYNC="88"
+  export CARGO_TERM_COLOR="always" MIN_PASSED="72" MIN_PASSED_ASYNC="88" CARGO_PROFILE="test"
   # the default shell has no pipefail: without it cargo's exit status is lost in the pipe
   set -o pipefail
   log="$(mktemp)"
@@ -964,7 +966,7 @@ step "ci.yml / test: Test (feature async) [profile=debug]"
 (
   gh_step ci.yml.test
 (
-  export CARGO_TERM_COLOR="always" MIN_PASSED="72" MIN_PASSED_ASYNC="88"
+  export CARGO_TERM_COLOR="always" MIN_PASSED="72" MIN_PASSED_ASYNC="88" CARGO_PROFILE="test"
   set -o pipefail
   log="$(mktemp)"
   cargo test --locked --profile "${CARGO_PROFILE}" --features async 2>&1 | tee "${log}"
@@ -985,7 +987,58 @@ step "ci.yml / test: Test (feature async) [profile=debug]"
 step "ci.yml / test: Law tests (semantics goldens and identifier, Noise vectors) [profile=debug]"
 (
   gh_step ci.yml.test
-( export CARGO_TERM_COLOR="always" MIN_PASSED="72" MIN_PASSED_ASYNC="88"; scripts/run_tests.sh semantics_golden=4,channel_semantics_id=8,noise_vectors=12 -- cargo test --locked --profile "${CARGO_PROFILE}" --test semantics_golden --test channel_semantics_id --test noise_vectors )
+( export CARGO_TERM_COLOR="always" MIN_PASSED="72" MIN_PASSED_ASYNC="88" CARGO_PROFILE="test"; scripts/run_tests.sh semantics_golden=4,channel_semantics_id=8,noise_vectors=12 -- cargo test --locked --profile "${CARGO_PROFILE}" --test semantics_golden --test channel_semantics_id --test noise_vectors )
+)
+
+step "ci.yml / test: Test (lib, integration, doctests) [profile=release]"
+(
+  gh_step ci.yml.test
+(
+  export CARGO_TERM_COLOR="always" MIN_PASSED="72" MIN_PASSED_ASYNC="88" CARGO_PROFILE="release"
+  # the default shell has no pipefail: without it cargo's exit status is lost in the pipe
+  set -o pipefail
+  log="$(mktemp)"
+  cargo test --locked --profile "${CARGO_PROFILE}" 2>&1 | tee "${log}"
+  passed=$(grep -E '^test result: ' "${log}" | awk '{s += $4} END {print s + 0}')
+  failed=$(grep -E '^test result: ' "${log}" | awk '{s += $6} END {print s + 0}')
+  echo "passed: ${passed} (minimum ${MIN_PASSED}), failed: ${failed}"
+  if [ "${failed}" -ne 0 ] || grep -E '^test result: ' "${log}" | grep -vE '^test result: ok\. ' >/dev/null; then
+    echo "::error::${failed} tests failed"
+    exit 1
+  fi
+  if [ "${passed}" -lt "${MIN_PASSED}" ]; then
+    echo "::error::${passed} tests passed, fewer than ${MIN_PASSED}"
+    exit 1
+  fi
+)
+)
+
+step "ci.yml / test: Test (feature async) [profile=release]"
+(
+  gh_step ci.yml.test
+(
+  export CARGO_TERM_COLOR="always" MIN_PASSED="72" MIN_PASSED_ASYNC="88" CARGO_PROFILE="release"
+  set -o pipefail
+  log="$(mktemp)"
+  cargo test --locked --profile "${CARGO_PROFILE}" --features async 2>&1 | tee "${log}"
+  passed=$(grep -E '^test result: ' "${log}" | awk '{s += $4} END {print s + 0}')
+  failed=$(grep -E '^test result: ' "${log}" | awk '{s += $6} END {print s + 0}')
+  echo "passed: ${passed} (minimum ${MIN_PASSED_ASYNC}), failed: ${failed}"
+  if [ "${failed}" -ne 0 ] || grep -E '^test result: ' "${log}" | grep -vE '^test result: ok\. ' >/dev/null; then
+    echo "::error::${failed} tests failed"
+    exit 1
+  fi
+  if [ "${passed}" -lt "${MIN_PASSED_ASYNC}" ]; then
+    echo "::error::${passed} tests passed, fewer than ${MIN_PASSED_ASYNC}"
+    exit 1
+  fi
+)
+)
+
+step "ci.yml / test: Law tests (semantics goldens and identifier, Noise vectors) [profile=release]"
+(
+  gh_step ci.yml.test
+( export CARGO_TERM_COLOR="always" MIN_PASSED="72" MIN_PASSED_ASYNC="88" CARGO_PROFILE="release"; scripts/run_tests.sh semantics_golden=4,channel_semantics_id=8,noise_vectors=12 -- cargo test --locked --profile "${CARGO_PROFILE}" --test semantics_golden --test channel_semantics_id --test noise_vectors )
 )
 
 step "ci.yml / float-environment: Float environment (debug and release)"
@@ -1062,6 +1115,8 @@ leg_not_run() {
     *) not_run "$1 [runs-on=$2] (an OS leg this host does not run)" ;;
   esac
 }
+not_run 'ci.yml:test:ALICE-Law G11 self-check (the four G11 checks at the pinned revision) [profile=debug] (no cargo / grep)'
+not_run 'ci.yml:test:ALICE-Law G11 self-check (the four G11 checks at the pinned revision) [profile=release] (no cargo / grep)'
 not_run 'ci.yml:wasm-js:wasm-bindgen version from Cargo.lock (no cargo / grep)'
 not_run 'ci.yml:wasm-js:Put wasm-bindgen-cli on PATH (no cargo / grep)'
 not_run 'security-audit.yml:coverage:Report a failed coverage run (its `if:` runs on what happened earlier on the runner)'

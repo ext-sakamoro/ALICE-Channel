@@ -167,6 +167,17 @@ jobs:
       - name: Law tests (semantics goldens and identifier, Noise vectors)
         run: scripts/run_tests.sh semantics_golden=4,channel_semantics_id=8,noise_vectors=12 -- cargo test --locked --profile "${CARGO_PROFILE}" --test semantics_golden --test channel_semantics_id --test noise_vectors
 
+      # ALICE-Law G11: ALICE-Law's own self-check at the pinned revision (table, rows, shared copies, own copies
+      # at their targets, manifest and its anchors), on every leg of the matrix
+      - name: ALICE-Law G11 self-check (the four G11 checks at the pinned revision)
+        shell: bash
+        run: |
+          rev=$(awk '$1 == "rev" { print $2 }' .github/shared-files-pin)
+          git -c core.autocrlf=false clone --quiet --filter=blob:none https://github.com/ext-sakamoro/ALICE-Law.git "$RUNNER_TEMP/alice-law"
+          git -C "$RUNNER_TEMP/alice-law" checkout --quiet --detach "$rev"
+          PY=$(command -v python3 || command -v python)
+          "$PY" "$RUNNER_TEMP/alice-law/scripts/g11_self_check.py" --repo . --name ALICE-Channel
+
   float-environment:
     # ALICE-Law G14 on each OS: round-to-nearest-even and no flush-to-zero at run time in both
     # profiles (scripts/run_tests.sh float_environment=2 fails unless both tests passed), the
