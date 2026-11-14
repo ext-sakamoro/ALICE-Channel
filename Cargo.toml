@@ -23,4 +23,12 @@ async = ["dep:tokio"]
 
 [dev-dependencies]
 serde_json = "1"
+
+# the async tests (a multi-threaded runtime, which tokio does not build for wasm32-unknown-unknown)
+[target.'cfg(not(all(target_arch = "wasm32", target_os = "unknown")))'.dev-dependencies]
 tokio = { version = "1", features = ["io-util", "time", "rt", "rt-multi-thread", "macros", "sync"] }
+
+# runs tests/wasm_handshake.rs on wasm32-unknown-unknown under Node (`wasm-bindgen-test-runner`, the version of
+# the `wasm-bindgen` entry in Cargo.lock)
+[target.'cfg(all(target_arch = "wasm32", target_os = "unknown"))'.dev-dependencies]
+wasm-bindgen-test = "0.3"

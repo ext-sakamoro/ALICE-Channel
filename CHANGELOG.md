@@ -4,6 +4,10 @@ All notable changes to ALICE-Channel are documented here. While crates.io is fro
 
 ## [Unreleased]
 
+### Added
+- WebAssembly (wasm32-unknown-unknown) の JavaScript の host (browser、Node、edge の runtime) で datagram の handshake が動くことを確かめる試験 `tests/wasm_handshake.rs` (2 本): 鍵は全て host の乱数 (alice-crypto 経由の `crypto.getRandomValues`) から作り、発信側と応答側を 1 つの process で handshake させ、両方向に data を送って開く (1 度だけ開く)、同じ 2 者の 2 回の handshake は transcript が違う この target の標準 library には system の時計が無いので、init の時刻は `Initiator::start_at` で渡す (stream の channel と `Initiator::start` は時計を読むのでこの target では使えない) CI の `wasm-js` job が Node と `wasm-bindgen-test-runner` (Cargo.lock の wasm-bindgen と同じ版) で走らせ、通った試験が file の試験数より少なければ (0 を含む) 失敗する (`scripts/wasm_js_test.sh`、preflight も) 他の target では通常の試験として走る alice-crypto が wasm32-unknown-unknown で getrandom の `js` backend を使う前の版では、build の段階で失敗する (確かめた)
+- 試験の依存: tokio (async の試験) を wasm32-unknown-unknown 以外の dev-dependency にした (tokio はこの target で multi-thread の runtime を build しない)、wasm32-unknown-unknown の dev-dependency に wasm-bindgen-test
+
 ### Changed
 - 依存: alice-identity を 3.0 にする (失効は戻らない `DropsRevoked`、公開の error enum が non_exhaustive) branch main のまま、lock は 3.0 の commit code の変更は無し (利用している variant を網羅 match していない)
 - 依存: alice-crypto 0.7 (機能ごとの feature に分かれた、既定の build は同じ API)

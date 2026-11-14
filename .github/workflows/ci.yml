@@ -257,6 +257,50 @@ jobs:
           case "$v" in "cargo 1.88."*) ;; *) echo "::error::not cargo 1.88: $v"; exit 1 ;; esac
           cargo +1.88 check --all-features
 
+  # WebAssembly in a JavaScript host (wasm32-unknown-unknown: browsers, Node, edge runtimes):
+  # tests/wasm_handshake.rs generates every key from the host's random source (through alice-crypto), runs
+  # the datagram handshake between an initiator and a responder in one process and round-trips data both
+  # ways, under Node; every test in it must pass, so a run of 0 fails (scripts/wasm_js_test.sh). The runner
+  # is wasm-bindgen-cli at the version of `wasm-bindgen` in Cargo.lock
+  wasm-js:
+    name: wasm32-unknown-unknown under Node (datagram handshake with fresh keys)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v5
+      # the toolchain and its wasm32-unknown-unknown target come from rust-toolchain.toml (the pin)
+      - name: Install the pinned toolchain
+        run: rustup toolchain install
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: wasm-js
+      - name: wasm-bindgen version from Cargo.lock
+        id: wb
+        shell: bash
+        run: |
+          set -euo pipefail
+          v="$(awk '/^name = "wasm-bindgen"$/ { getline; gsub(/version = |"/, ""); print; exit }' Cargo.lock)"
+          if [ -z "$v" ]; then echo "::error::Cargo.lock has no wasm-bindgen entry"; exit 1; fi
+          echo "version=$v" >> "$GITHUB_OUTPUT"
+      - name: Cache wasm-bindgen-cli
+        id: wb-cache
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.wasm-bindgen-cli
+          key: wasm-bindgen-cli-${{ steps.wb.outputs.version }}-x86_64-linux
+      # crates.io with the crate's own lock file (cargo checks every downloaded crate's checksum); the
+      # workflow's -Dwarnings is not applied to the tool's build
+      - name: Install wasm-bindgen-cli
+        if: steps.wb-cache.outputs.cache-hit != 'true'
+        env:
+          RUSTFLAGS: ""
+          V: ${{ steps.wb.outputs.version }}
+        run: cargo install wasm-bindgen-cli --version "$V" --locked --root ~/.wasm-bindgen-cli
+      - name: Put wasm-bindgen-cli on PATH
+        run: echo "$HOME/.wasm-bindgen-cli/bin" >> "$GITHUB_PATH"
+      - name: Check and test on wasm32-unknown-unknown under Node (every test passes, 0 fails)
+        run: scripts/wasm_js_test.sh wasm_handshake
+
   actionlint:
     name: actionlint
     runs-on: ubuntu-latest
