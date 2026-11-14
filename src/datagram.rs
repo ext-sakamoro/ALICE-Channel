@@ -44,6 +44,7 @@ use std::collections::BTreeMap;
 
 use alice_identity::device_cert::DeviceCert;
 
+use crate::clock::Clock;
 use crate::noise::{DatagramTransport, HandshakeState, Keypair, NoiseError};
 use crate::{
     dial_key, expect_subject, sign_handshake, verify_peer, write_signed, ChannelError, Credential,
@@ -92,13 +93,22 @@ impl InitTimestamp {
         Self(b)
     }
 
-    /// The label of the system clock now (before 1970 counts as 1970)
+    /// The label of `clock`'s wall clock now (before 1970 counts as 1970)
     #[must_use]
-    pub fn now() -> Self {
-        let d = crate::clock::system_now()
+    pub fn from_clock(clock: &impl Clock) -> Self {
+        let d = clock
+            .system_now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default();
         Self::from_unix(d.as_secs(), d.subsec_nanos())
+    }
+
+    /// The label of the system clock now (before 1970 counts as 1970); not on `wasm32-unknown-unknown`, which
+    /// has no system clock (use [`Self::from_clock`] or [`Self::from_unix`])
+    #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
+    #[must_use]
+    pub fn now() -> Self {
+        Self::from_clock(&crate::clock::SystemClock)
     }
 }
 
@@ -201,25 +211,42 @@ pub struct Initiator {
 }
 
 impl Initiator {
-    /// Start a handshake with the device `peer` certifies; returns the init packet to send (repeat it
-    /// with [`Self::first`] until the response comes)
+    /// Start a handshake with the device `peer` certifies, the init labelled with the system clock; returns
+    /// the init packet to send (repeat it with [`Self::first`] until the response comes)
     ///
     /// # Errors
-    /// [`ChannelError::UnknownPeer`] / [`ChannelError::Rejected`] when `peer` is refused,
-    /// [`ChannelError::Credential`], [`ChannelError::Noise`]
+    /// As [`Self::start_with_clock`]
+    #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
     pub fn start(
         cred: &Credential,
         policy: &impl PeerPolicy,
         peer: &DeviceCert,
     ) -> Result<(Self, Vec<u8>), ChannelError> {
-        Self::start_at(cred, policy, peer, InitTimestamp::now())
+        Self::start_with_clock(cred, policy, peer, &crate::clock::SystemClock)
     }
 
-    /// As [`Self::start`], with the init's timestamp given (it must be later than any earlier init of
+    /// Start a handshake with the device `peer` certifies, the init labelled with `clock`'s wall clock;
+    /// returns the init packet to send (repeat it with [`Self::first`] until the response comes). On
+    /// `wasm32-unknown-unknown`, where the standard library has no clock, this or [`Self::start_at`] starts a
+    /// handshake
+    ///
+    /// # Errors
+    /// [`ChannelError::UnknownPeer`] / [`ChannelError::Rejected`] when `peer` is refused,
+    /// [`ChannelError::Credential`], [`ChannelError::Noise`]
+    pub fn start_with_clock(
+        cred: &Credential,
+        policy: &impl PeerPolicy,
+        peer: &DeviceCert,
+        clock: &impl Clock,
+    ) -> Result<(Self, Vec<u8>), ChannelError> {
+        Self::start_at(cred, policy, peer, InitTimestamp::from_clock(clock))
+    }
+
+    /// As [`Self::start_with_clock`], with the init's timestamp given (it must be later than any earlier init of
     /// this static key to the same responder)
     ///
     /// # Errors
-    /// As [`Self::start`]
+    /// As [`Self::start_with_clock`]
     pub fn start_at(
         cred: &Credential,
         policy: &impl PeerPolicy,
@@ -235,7 +262,7 @@ impl Initiator {
     /// voids the protocol's guarantees)
     ///
     /// # Errors
-    /// As [`Self::start`]
+    /// As [`Self::start_with_clock`]
     pub fn start_with_ephemeral(
         cred: &Credential,
         policy: &impl PeerPolicy,

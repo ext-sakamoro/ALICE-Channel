@@ -20,6 +20,9 @@ use std::time::Duration;
 
 use alice_identity::device_cert::DeviceCert;
 
+#[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
+use crate::clock::SystemClock;
+use crate::clock::{Clock, DefaultClock};
 use crate::noise::nk::NkHandshakeState;
 use crate::noise::{NoiseError, Transport};
 use crate::{
@@ -34,16 +37,19 @@ pub const ANONYMOUS_PROLOGUE: &[u8] = b"alice-channel anonymous v1";
 /// The length of the initiator's first message: its ephemeral key and the tag of the empty payload
 pub const FIRST_MESSAGE_LEN: usize = 32 + CONFIRMATION_LEN;
 
-/// An open channel whose initiator is not named: the transport keys over `S`, and on the initiator's side the
-/// responder's certificate it dialled
-pub struct AnonymousChannel<S> {
+/// An open channel whose initiator is not named
+///
+/// It holds the transport keys over `S`, on the initiator's side the responder's certificate it dialled, and
+/// the clock `C` its deadlines read (as for [`crate::SecureChannel`])
+pub struct AnonymousChannel<S, C = DefaultClock> {
     stream: S,
     transport: Transport,
     responder: Option<DeviceCert>,
     poisoned: bool,
+    clock: C,
 }
 
-impl<S: Read + Write + ReadTimeout> AnonymousChannel<S> {
+impl<S: Read + Write + ReadTimeout, C: Clock> AnonymousChannel<S, C> {
     /// Receive the next message, waiting at most `deadline` for the whole of it
     ///
     /// # Errors
@@ -53,30 +59,19 @@ impl<S: Read + Write + ReadTimeout> AnonymousChannel<S> {
         if self.poisoned {
             return Err(ChannelError::Poisoned);
         }
-        let frame = read_frame_within(&mut self.stream, deadline).map_err(|(e, started)| {
-            self.poisoned = started;
-            e
-        })?;
+        let frame = read_frame_within(&mut self.stream, &self.clock, deadline).map_err(
+            |(e, started)| {
+                self.poisoned = started;
+                e
+            },
+        )?;
         self.poisoned = true;
         let payload = self.transport.recv(&frame)?;
         self.poisoned = false;
         Ok(payload)
     }
 
-    /// Open an anonymous channel to the device `responder` certifies, waiting
-    /// [`crate::DEFAULT_CONFIRM_TIMEOUT`] for its message
-    ///
-    /// # Errors
-    /// As [`Self::connect_with_timeout`]
-    pub fn connect(
-        stream: S,
-        policy: &impl PeerPolicy,
-        responder: &DeviceCert,
-    ) -> Result<Self, ChannelError> {
-        Self::connect_with_timeout(stream, policy, responder, crate::DEFAULT_CONFIRM_TIMEOUT)
-    }
-
-    /// Open an anonymous channel to the device `responder` certifies. `responder` is checked against the
+    /// Open an anonymous channel to the device `responder` certifies, reading time from `clock`. `responder` is checked against the
     /// policy before anything is written; the channel is returned once the responder's message has come
     /// within `timeout` and opened, and this side's key confirmation is sent before returning
     ///
@@ -84,17 +79,18 @@ impl<S: Read + Write + ReadTimeout> AnonymousChannel<S> {
     /// [`ChannelError::UnknownPeer`] / [`ChannelError::Rejected`] when `responder` is refused (nothing is
     /// written), [`ChannelError::Noise`] when the responder's message does not open (another static key),
     /// [`ChannelError::Timeout`], [`ChannelError::Closed`], [`ChannelError::Io`]
-    pub fn connect_with_timeout(
+    pub fn connect_with_clock(
         mut stream: S,
         policy: &impl PeerPolicy,
         responder: &DeviceCert,
         timeout: Duration,
+        clock: C,
     ) -> Result<Self, ChannelError> {
         let rs = dial_key(responder, policy)?;
         let mut hs = NkHandshakeState::initiator(ANONYMOUS_PROLOGUE, rs);
         // the first payload is empty: nothing of this side travels
         write_frame(&mut stream, &hs.write_message(&[])?)?;
-        let frame = read_frame_before(&mut stream, timeout, None)?;
+        let frame = read_frame_before(&mut stream, &clock, timeout, None)?;
         if !hs.read_message(&frame)?.is_empty() {
             return Err(ChannelError::Noise(NoiseError::Decrypt));
         }
@@ -106,18 +102,11 @@ impl<S: Read + Write + ReadTimeout> AnonymousChannel<S> {
             transport,
             responder: Some(responder.clone()),
             poisoned: false,
+            clock,
         })
     }
 
-    /// Accept an anonymous channel as the device `cred` names, waiting [`crate::DEFAULT_CONFIRM_TIMEOUT`]
-    ///
-    /// # Errors
-    /// As [`Self::accept_with_timeout`]
-    pub fn accept(stream: S, cred: &Credential) -> Result<Self, ChannelError> {
-        Self::accept_with_timeout(stream, cred, crate::DEFAULT_CONFIRM_TIMEOUT)
-    }
-
-    /// Accept an anonymous channel. Nothing is written unless the first message opens for this side's static
+    /// Accept an anonymous channel, reading time from `clock`. Nothing is written unless the first message opens for this side's static
     /// key under [`ANONYMOUS_PROLOGUE`] with an empty payload; the channel is returned once the initiator's
     /// key confirmation has come within `timeout`
     ///
@@ -125,32 +114,85 @@ impl<S: Read + Write + ReadTimeout> AnonymousChannel<S> {
     /// [`ChannelError::Noise`] when the first message does not open (another static key, another prologue,
     /// a non-empty payload) or its frame is not [`FIRST_MESSAGE_LEN`] long, [`ChannelError::Timeout`],
     /// [`ChannelError::Closed`], [`ChannelError::Io`]
-    pub fn accept_with_timeout(
+    pub fn accept_with_clock(
         mut stream: S,
         cred: &Credential,
         timeout: Duration,
+        clock: C,
     ) -> Result<Self, ChannelError> {
         let mut hs = NkHandshakeState::responder(ANONYMOUS_PROLOGUE, cred.noise_static().clone());
         // the first message is always an ephemeral key and the tag of an empty payload: a frame of another
         // length is refused from its header, before any body is read or any key agreement is done
-        let first = read_frame_before(&mut stream, timeout, Some(FIRST_MESSAGE_LEN))?;
+        let first = read_frame_before(&mut stream, &clock, timeout, Some(FIRST_MESSAGE_LEN))?;
         if !hs.read_message(&first)?.is_empty() {
             return Err(ChannelError::Noise(NoiseError::Decrypt));
         }
         write_frame(&mut stream, &hs.write_message(&[])?)?;
         let mut transport = hs.into_transport()?;
-        let frame = read_frame_before(&mut stream, timeout, Some(CONFIRMATION_LEN))?;
+        let frame = read_frame_before(&mut stream, &clock, timeout, Some(CONFIRMATION_LEN))?;
         open_confirmation(&mut transport, &frame)?;
         Ok(Self {
             stream,
             transport,
             responder: None,
             poisoned: false,
+            clock,
         })
     }
 }
 
-impl<S: Read + Write> AnonymousChannel<S> {
+/// The constructors without a clock argument: they use [`SystemClock`], so they do not exist on
+/// `wasm32-unknown-unknown`
+#[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
+impl<S: Read + Write + ReadTimeout> AnonymousChannel<S, SystemClock> {
+    /// Open an anonymous channel to the device `responder` certifies, waiting
+    /// [`crate::DEFAULT_CONFIRM_TIMEOUT`] for its message
+    ///
+    /// # Errors
+    /// As [`Self::connect_with_clock`] with [`SystemClock`]
+    pub fn connect(
+        stream: S,
+        policy: &impl PeerPolicy,
+        responder: &DeviceCert,
+    ) -> Result<Self, ChannelError> {
+        Self::connect_with_timeout(stream, policy, responder, crate::DEFAULT_CONFIRM_TIMEOUT)
+    }
+
+    /// As [`Self::connect_with_clock`] with [`SystemClock`]
+    ///
+    /// # Errors
+    /// As [`Self::connect_with_clock`]
+    pub fn connect_with_timeout(
+        stream: S,
+        policy: &impl PeerPolicy,
+        responder: &DeviceCert,
+        timeout: Duration,
+    ) -> Result<Self, ChannelError> {
+        Self::connect_with_clock(stream, policy, responder, timeout, SystemClock)
+    }
+
+    /// Accept an anonymous channel as the device `cred` names, waiting [`crate::DEFAULT_CONFIRM_TIMEOUT`]
+    ///
+    /// # Errors
+    /// As [`Self::accept_with_clock`] with [`SystemClock`]
+    pub fn accept(stream: S, cred: &Credential) -> Result<Self, ChannelError> {
+        Self::accept_with_timeout(stream, cred, crate::DEFAULT_CONFIRM_TIMEOUT)
+    }
+
+    /// As [`Self::accept_with_clock`] with [`SystemClock`]
+    ///
+    /// # Errors
+    /// As [`Self::accept_with_clock`]
+    pub fn accept_with_timeout(
+        stream: S,
+        cred: &Credential,
+        timeout: Duration,
+    ) -> Result<Self, ChannelError> {
+        Self::accept_with_clock(stream, cred, timeout, SystemClock)
+    }
+}
+
+impl<S: Read + Write, C> AnonymousChannel<S, C> {
     /// Send one message
     ///
     /// # Errors

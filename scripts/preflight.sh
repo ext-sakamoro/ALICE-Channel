@@ -795,6 +795,12 @@ step "ci.yml / wasm-js: Check and test on wasm32-unknown-unknown under Node (eve
 ( export CARGO_TERM_COLOR="always"; scripts/wasm_js_test.sh wasm_handshake )
 )
 
+step "ci.yml / wasm-js: Constructors without a clock are refused on wasm32-unknown-unknown (compile checks)"
+(
+  gh_step ci.yml.wasm-js
+( export CARGO_TERM_COLOR="always"; python3 scripts/wasm_clock_required.py )
+)
+
 step "ci.yml / actionlint: actionlint"
 (
   gh_step ci.yml.actionlint
