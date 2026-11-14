@@ -71,7 +71,7 @@ dependencies = [
 [[package]]
 name = "alice-identity"
 version = "3.0.0"
-source = "git+https://github.com/ext-sakamoro/ALICE-Identity?branch=main#8c3ef375d401c4f7ac321cbfc3d2518c99841473"
+source = "git+https://github.com/ext-sakamoro/ALICE-Identity?branch=main#7ad904fa95c4b63718561663b59004bda626247d"
 dependencies = [
  "alice-crypto",
  "alice-sign",

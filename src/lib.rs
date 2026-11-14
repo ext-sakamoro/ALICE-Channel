@@ -41,8 +41,9 @@ pub mod semantics;
 #[cfg(feature = "async")]
 mod async_channel;
 pub use anonymous::{
-    AnonymousChannel, AnonymousError, AwaitConfirmation, Initiate, Respond, ANONYMOUS_PROLOGUE,
-    FIRST_MESSAGE_LEN, KEY_CONFIRMATION_LEN, RESPONSE_LEN,
+    accept_messages, connect_messages, AnonymousChannel, AnonymousError, AwaitConfirmation,
+    Initiate, MessageIo, Respond, ANONYMOUS_PROLOGUE, FIRST_MESSAGE_LEN, KEY_CONFIRMATION_LEN,
+    RESPONSE_LEN,
 };
 #[cfg(feature = "async")]
 pub use async_channel::{AsyncRecvHalf, AsyncSecureChannel, AsyncSendHalf};
@@ -57,8 +58,11 @@ use alice_identity::artifact::{
     sha256_payload, sign_artifact, verify_artifact, ArtifactError, ArtifactSignature,
     PayloadDigest, Revocation,
 };
-use alice_identity::device_cert::DeviceCert;
+use alice_identity::device_cert::{DeviceCert, DeviceCertError};
 use alice_identity::did::Did;
+use alice_identity::service_cert::{
+    service_subject, verify_service_cert, ServiceCertError, SERVICE_DID_METHOD,
+};
 use alice_sign::{KeyPair, PublicKey};
 
 use noise::{HandshakeState, Keypair, NoiseError, Transport};
@@ -148,6 +152,122 @@ pub trait PeerPolicy {
     fn revocation(&self) -> Revocation<'_>;
     /// The time at which the peer's certificate must be valid (seconds, as the certificate counts them)
     fn now(&self) -> u64;
+    /// A further check of a peer's certificate, run after it has passed the checks above (its subject's
+    /// master key, verification at [`Self::now`], revocation) and before it is acted on
+    ///
+    /// Every certificate this side accepts goes through it: the one it dials ([`check_cert`]) and the one a
+    /// peer proves in a handshake. The default accepts; [`PinnedPeer`] uses it to apply the service
+    /// certificate rules of `alice-identity` (`verify_service_cert`) to a service
+    ///
+    /// # Errors
+    /// The refusal to report
+    fn check_further(&self, cert: &DeviceCert) -> Result<(), ChannelError> {
+        let _ = cert;
+        Ok(())
+    }
+}
+
+/// A [`PeerPolicy`] that trusts exactly one subject under exactly one master key, at one time, against one
+/// set of revocation lists
+///
+/// [`PeerPolicy::master_of`] returns the master key for that subject and `None` for every other one, so a
+/// certificate of another subject is [`ChannelError::UnknownPeer`] and one under another master key is
+/// [`ChannelError::Rejected`] (`IssuerMismatch`), both before anything is written.
+///
+/// When the subject is a service DID (`did:alice-service:<service>`, from [`Self::service`] or given to
+/// [`Self::new`]), every certificate this policy accepts must also pass `verify_service_cert` for that
+/// service: the service name rule and the bound on the lifetime (`not_after - issued_at` at most
+/// `SERVICE_CERT_MAX_LIFETIME_SECS`) are checked as well as the device certificate rules, so dialling a
+/// service never accepts a certificate the service certificate rules refuse
+#[derive(Debug, Clone)]
+pub struct PinnedPeer<'a> {
+    subject: Did,
+    master: PublicKey,
+    now: u64,
+    revocation: Revocation<'a>,
+}
+
+impl<'a> PinnedPeer<'a> {
+    /// Trust `subject` under `master` at `now`, checking certificates against `revocation`
+    #[must_use]
+    pub const fn new(
+        subject: Did,
+        master: PublicKey,
+        now: u64,
+        revocation: Revocation<'a>,
+    ) -> Self {
+        Self {
+            subject,
+            master,
+            now,
+            revocation,
+        }
+    }
+
+    /// Trust the service named `service` (subject `did:alice-service:<service>`) under the operator's master
+    /// key `master` at `now`, checking certificates against `revocation`
+    ///
+    /// # Errors
+    /// [`ServiceCertError::BadServiceName`] when `service` breaks the service name rule
+    pub fn service(
+        service: &str,
+        master: PublicKey,
+        now: u64,
+        revocation: Revocation<'a>,
+    ) -> Result<Self, ServiceCertError> {
+        Ok(Self::new(
+            service_subject(service)?,
+            master,
+            now,
+            revocation,
+        ))
+    }
+
+    /// The one subject this policy trusts
+    #[must_use]
+    pub const fn subject(&self) -> &Did {
+        &self.subject
+    }
+}
+
+impl PeerPolicy for PinnedPeer<'_> {
+    fn master_of(&self, subject: &Did) -> Option<PublicKey> {
+        (*subject == self.subject).then_some(self.master)
+    }
+    fn revocation(&self) -> Revocation<'_> {
+        self.revocation
+    }
+    fn now(&self) -> u64 {
+        self.now
+    }
+    fn check_further(&self, cert: &DeviceCert) -> Result<(), ChannelError> {
+        if self.subject.method != SERVICE_DID_METHOD {
+            return Ok(());
+        }
+        verify_service_cert(
+            cert,
+            &self.master,
+            &self.subject.id,
+            self.now,
+            self.revocation,
+        )
+        .map(|_| ())
+        .map_err(service_refusal)
+    }
+}
+
+/// A service certificate refusal as the channel reports a refused peer
+const fn service_refusal(e: ServiceCertError) -> ChannelError {
+    match e {
+        ServiceCertError::Cert(e) => ChannelError::Rejected(ArtifactError::Cert(e)),
+        ServiceCertError::Revoked => ChannelError::Rejected(ArtifactError::Revoked),
+        // the validity the certificate states is not one a service certificate may have
+        ServiceCertError::LifetimeTooLong(_) => {
+            ChannelError::Rejected(ArtifactError::Cert(DeviceCertError::InvalidValidity))
+        }
+        // a malformed name, another service or not a service: not the subject this policy trusts
+        _ => ChannelError::UnknownPeer,
+    }
 }
 
 /// One device's identity on a channel: its certified signing key and its Noise static key
@@ -225,8 +345,10 @@ pub fn sign_handshake(cred: &Credential, h: &[u8; 32]) -> Result<ArtifactSignatu
     .map_err(ChannelError::Credential)
 }
 
-/// Check `cert` against the policy as it stands: the subject's master key is known, the certificate verifies
-/// under it at [`PeerPolicy::now`], and no revocation list the policy holds revokes it
+/// Check `cert` against the policy as it stands
+///
+/// The subject's master key is known, the certificate verifies under it at [`PeerPolicy::now`], no
+/// revocation list the policy holds revokes it, and [`PeerPolicy::check_further`] accepts it
 ///
 /// # Errors
 /// [`ChannelError::UnknownPeer`], [`ChannelError::Rejected`]
@@ -241,7 +363,7 @@ pub fn check_cert(cert: &DeviceCert, policy: &impl PeerPolicy) -> Result<(), Cha
             return Err(ChannelError::Rejected(ArtifactError::Revoked));
         }
     }
-    Ok(())
+    policy.check_further(cert)
 }
 
 /// Check the peer's handshake payload against the transcript hash `h` and its Noise static key `rs`
@@ -269,6 +391,7 @@ fn verify_peer(
     if *sig.cert().noise_static() != rs {
         return Err(ChannelError::StaticKeyMismatch);
     }
+    policy.check_further(sig.cert())?;
     Ok(sig.cert().clone())
 }
 

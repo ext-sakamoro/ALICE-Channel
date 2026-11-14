@@ -317,6 +317,79 @@ impl AwaitConfirmation {
     }
 }
 
+/// A transport that carries whole messages (a WebSocket, a message queue, a datagram link with its own
+/// framing): each `send` is one message and each `recv` returns one whole message
+///
+/// [`connect_messages`] and [`accept_messages`] run the anonymous handshake over it with the same bytes as
+/// [`Initiate`] / [`Respond`]. Unlike [`AnonymousChannel`], no length prefix is added, since the transport
+/// keeps message boundaries itself. Deadlines are the transport's: a `recv` that waits too long returns its
+/// own error ([`ChannelError::Timeout`], for example)
+pub trait MessageIo {
+    /// Send `message` as one message
+    ///
+    /// # Errors
+    /// The transport's own
+    fn send(&mut self, message: &[u8]) -> Result<(), ChannelError>;
+    /// Receive the next whole message; `max` is the longest message the caller accepts, so a transport may
+    /// refuse a longer one before reading it (a longer one returned is refused by the caller)
+    ///
+    /// # Errors
+    /// The transport's own
+    fn recv(&mut self, max: usize) -> Result<Vec<u8>, ChannelError>;
+}
+
+/// Run the initiator's side of the anonymous handshake over a message transport
+///
+/// Check `responder` against `policy` and send the first message ([`FIRST_MESSAGE_LEN`] bytes), receive the response (exactly
+/// [`RESPONSE_LEN`] bytes), send the key confirmation ([`KEY_CONFIRMATION_LEN`] bytes) and return the
+/// transport keys
+///
+/// The bytes sent are those of [`Initiate::dial`] and [`Initiate::finish`]. Nothing is sent when `responder`
+/// is refused
+///
+/// # Errors
+/// [`ChannelError::UnknownPeer`] / [`ChannelError::Rejected`] when `responder` is refused (nothing is
+/// sent), [`ChannelError::Noise`] when the response is not [`RESPONSE_LEN`] long or does not open (another
+/// static key answered, a changed byte), the transport's own errors
+pub fn connect_messages(
+    io: &mut impl MessageIo,
+    responder: &DeviceCert,
+    policy: &impl PeerPolicy,
+) -> Result<Transport, ChannelError> {
+    let (init, first) = Initiate::dial(responder, policy)?;
+    io.send(&first)?;
+    // `finish` refuses any length but RESPONSE_LEN before any key agreement (one check, not a copy here)
+    let response = io.recv(RESPONSE_LEN)?;
+    let (transport, confirmation) = init.finish(&response)?;
+    // key confirmation: the responder's handshake ends only once it opens this
+    io.send(&confirmation)?;
+    Ok(transport)
+}
+
+/// Run the responder's side of the anonymous handshake over a message transport
+///
+/// With the Noise static key `static_key`: receive the first message (exactly [`FIRST_MESSAGE_LEN`] bytes), send the response
+/// ([`RESPONSE_LEN`] bytes), receive the key confirmation (exactly [`KEY_CONFIRMATION_LEN`] bytes) and return
+/// the transport keys
+///
+/// The bytes are those of [`Respond::respond`] and [`AwaitConfirmation::confirm`]. Nothing is sent when the
+/// first message is refused
+///
+/// # Errors
+/// [`ChannelError::Noise`] when a message is not its step's length or does not open, the transport's own
+/// errors
+pub fn accept_messages(
+    io: &mut impl MessageIo,
+    static_key: &Keypair,
+) -> Result<Transport, ChannelError> {
+    let respond = Respond::new(static_key.clone());
+    let first = io.recv(FIRST_MESSAGE_LEN)?;
+    let (pending, response) = respond.respond(&first)?;
+    io.send(&response)?;
+    let confirmation = io.recv(KEY_CONFIRMATION_LEN)?;
+    Ok(pending.confirm(&confirmation)?)
+}
+
 /// An open channel whose initiator is not named
 ///
 /// It holds the transport keys over `S`, on the initiator's side the responder's certificate it dialled, and
