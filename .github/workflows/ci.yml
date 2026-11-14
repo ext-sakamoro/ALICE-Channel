@@ -258,12 +258,12 @@ jobs:
           cargo +1.88 check --all-features
 
   # WebAssembly in a JavaScript host (wasm32-unknown-unknown: browsers, Node, edge runtimes):
-  # tests/wasm_handshake.rs generates every key from the host's random source (through alice-crypto), runs
-  # the datagram handshake between an initiator and a responder in one process and round-trips data both
-  # ways, under Node; every test in it must pass, so a run of 0 fails (scripts/wasm_js_test.sh). The runner
-  # is wasm-bindgen-cli at the version of `wasm-bindgen` in Cargo.lock
+  # tests/wasm_handshake.rs generates every key from the host's random source (through alice-crypto) and
+  # runs the datagram and the stream handshakes with a clock the test gives, round-tripping data both ways,
+  # under Node; every test in it must pass, so a run of 0 fails (scripts/wasm_js_test.sh). The runner is
+  # wasm-bindgen-cli at the version of `wasm-bindgen` in Cargo.lock
   wasm-js:
-    name: wasm32-unknown-unknown under Node (datagram handshake with fresh keys)
+    name: wasm32-unknown-unknown under Node (handshakes with fresh keys and a given clock)
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -300,6 +300,11 @@ jobs:
         run: echo "$HOME/.wasm-bindgen-cli/bin" >> "$GITHUB_PATH"
       - name: Check and test on wasm32-unknown-unknown under Node (every test passes, 0 fails)
         run: scripts/wasm_js_test.sh wasm_handshake
+      # no clock on wasm32-unknown-unknown: code that makes a channel or an init without one does not compile
+      # there (E0599), the same code compiles on the host, and the clock-taking constructors compile on both;
+      # fewer checks than listed fail
+      - name: Constructors without a clock are refused on wasm32-unknown-unknown (compile checks)
+        run: python3 scripts/wasm_clock_required.py
 
   actionlint:
     name: actionlint

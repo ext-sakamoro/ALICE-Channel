@@ -33,7 +33,7 @@
 #![warn(clippy::all, clippy::pedantic, clippy::nursery)]
 
 pub mod anonymous;
-mod clock;
+pub mod clock;
 pub mod datagram;
 pub mod noise;
 pub mod semantics;
@@ -43,9 +43,12 @@ mod async_channel;
 pub use anonymous::{AnonymousChannel, ANONYMOUS_PROLOGUE, FIRST_MESSAGE_LEN};
 #[cfg(feature = "async")]
 pub use async_channel::{AsyncRecvHalf, AsyncSecureChannel, AsyncSendHalf};
+#[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
+pub use clock::SystemClock;
+pub use clock::{Clock, DefaultClock};
 
 use std::io::{Read, Write};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use alice_identity::artifact::{
     sha256_payload, sign_artifact, verify_artifact, ArtifactError, ArtifactSignature,
@@ -369,22 +372,24 @@ pub(crate) const CONFIRMATION_LEN: usize = alice_crypto::chacha20poly1305_ietf::
 /// alone would restart with every byte a slow peer sends)
 fn read_before<S: Read + ReadTimeout>(
     stream: &mut S,
+    clock: &impl Clock,
     buf: &mut [u8],
-    end: Instant,
+    end: Duration,
 ) -> Result<(), ChannelError> {
-    read_counted(stream, buf, end, &mut 0)
+    read_counted(stream, clock, buf, end, &mut 0)
 }
 
 /// [`read_before`], adding to `taken` every byte it takes from the stream
 fn read_counted<S: Read + ReadTimeout>(
     stream: &mut S,
+    clock: &impl Clock,
     buf: &mut [u8],
-    end: Instant,
+    end: Duration,
     taken: &mut usize,
 ) -> Result<(), ChannelError> {
     let mut filled = 0;
     while filled < buf.len() {
-        let left = end.saturating_duration_since(clock::now());
+        let left = end.saturating_sub(clock.now());
         if left.is_zero() {
             return Err(ChannelError::Timeout);
         }
@@ -414,20 +419,21 @@ fn read_counted<S: Read + ReadTimeout>(
 /// its body is read. The stream's own read timeout is restored afterwards
 fn read_frame_before<S: Read + ReadTimeout>(
     stream: &mut S,
+    clock: &impl Clock,
     deadline: Duration,
     len: Option<usize>,
 ) -> Result<Vec<u8>, ChannelError> {
     let before = stream.read_timeout().map_err(|e| io(&e))?;
-    let end = clock::now() + deadline;
+    let end = clock.now().saturating_add(deadline);
     let read = (|| {
         let mut head = [0u8; 2];
-        read_before(stream, &mut head, end)?;
+        read_before(stream, clock, &mut head, end)?;
         let n = usize::from(u16::from_be_bytes(head));
         if len.is_some_and(|want| want != n) {
             return Err(ChannelError::Noise(NoiseError::Decrypt));
         }
         let mut body = vec![0u8; n];
-        read_before(stream, &mut body, end)?;
+        read_before(stream, clock, &mut body, end)?;
         Ok(body)
     })();
     stream.set_read_timeout(before).map_err(|e| io(&e))?;
@@ -438,16 +444,17 @@ fn read_frame_before<S: Read + ReadTimeout>(
 /// frame was taken from the stream
 pub(crate) fn read_frame_within<S: Read + ReadTimeout>(
     stream: &mut S,
+    clock: &impl Clock,
     deadline: Duration,
 ) -> Result<Vec<u8>, (ChannelError, bool)> {
     let before = stream.read_timeout().map_err(|e| (io(&e), false))?;
-    let now = clock::now();
+    let now = clock.now();
     // one end for the whole frame: each byte that comes does not move it
     let end = now
         .checked_add(deadline)
-        .unwrap_or_else(|| now + Duration::from_secs(u64::from(u32::MAX)));
+        .unwrap_or_else(|| now.saturating_add(Duration::from_secs(u64::from(u32::MAX))));
     let mut taken = 0;
-    let read = frame_by(stream, end, &mut taken);
+    let read = frame_by(stream, clock, end, &mut taken);
     // the stream's own timeout is set back whatever happened
     let restored = stream.set_read_timeout(before);
     match read {
@@ -459,25 +466,31 @@ pub(crate) fn read_frame_within<S: Read + ReadTimeout>(
 
 fn frame_by<S: Read + ReadTimeout>(
     stream: &mut S,
-    end: Instant,
+    clock: &impl Clock,
+    end: Duration,
     taken: &mut usize,
 ) -> Result<Vec<u8>, ChannelError> {
     let mut head = [0u8; 2];
-    read_counted(stream, &mut head, end, taken)?;
+    read_counted(stream, clock, &mut head, end, taken)?;
     let mut body = vec![0u8; usize::from(u16::from_be_bytes(head))];
-    read_counted(stream, &mut body, end, taken)?;
+    read_counted(stream, clock, &mut body, end, taken)?;
     Ok(body)
 }
 
 /// An open channel: the peer's certificate and the transport keys over `S`
-pub struct SecureChannel<S> {
+///
+/// Its deadlines read the clock `C` ([`DefaultClock`] when not named: `SystemClock`, except on
+/// `wasm32-unknown-unknown`, where a channel is made with [`Self::connect_with_clock`] /
+/// [`Self::accept_with_clock`])
+pub struct SecureChannel<S, C = DefaultClock> {
     stream: S,
     transport: Transport,
     peer: DeviceCert,
     poisoned: bool,
+    clock: C,
 }
 
-impl<S: Read + Write + ReadTimeout> SecureChannel<S> {
+impl<S: Read + Write + ReadTimeout, C: Clock> SecureChannel<S, C> {
     /// Receive the next message, waiting at most `deadline` for the whole of it
     ///
     /// # Errors
@@ -487,31 +500,20 @@ impl<S: Read + Write + ReadTimeout> SecureChannel<S> {
         if self.poisoned {
             return Err(ChannelError::Poisoned);
         }
-        let frame = read_frame_within(&mut self.stream, deadline).map_err(|(e, started)| {
-            self.poisoned = started;
-            e
-        })?;
+        let frame = read_frame_within(&mut self.stream, &self.clock, deadline).map_err(
+            |(e, started)| {
+                self.poisoned = started;
+                e
+            },
+        )?;
         self.poisoned = true;
         let payload = self.transport.recv(&frame)?;
         self.poisoned = false;
         Ok(payload)
     }
 
-    /// Open a channel to the device `peer` certifies, as the side that connected, waiting
-    /// [`DEFAULT_CONFIRM_TIMEOUT`] for the responder's message
-    ///
-    /// # Errors
-    /// As [`Self::connect_with_timeout`]
-    pub fn connect(
-        stream: S,
-        cred: &Credential,
-        policy: &impl PeerPolicy,
-        peer: &DeviceCert,
-    ) -> Result<Self, ChannelError> {
-        Self::connect_with_timeout(stream, cred, policy, peer, DEFAULT_CONFIRM_TIMEOUT)
-    }
-
-    /// Open a channel to the device `peer` certifies, as the side that connected. `peer` is checked against
+    /// Open a channel to the device `peer` certifies, as the side that connected, reading time from `clock`
+    /// (the deadline here and in [`Self::recv_before`]). `peer` is checked against
     /// the policy before anything is written, and its Noise static key is the responder key of the handshake.
     /// The channel is returned once the responder's message, which it writes only after verifying this side,
     /// has come within `timeout` and verifies as the subject of `peer`; this side's key confirmation is sent
@@ -522,17 +524,18 @@ impl<S: Read + Write + ReadTimeout> SecureChannel<S> {
     /// refused, [`ChannelError::StaticKeyMismatch`], [`ChannelError::UnexpectedPeer`],
     /// [`ChannelError::Closed`] or [`ChannelError::Io`] when the responder refused this side or went away,
     /// [`ChannelError::Timeout`] when its message did not come, [`ChannelError::Noise`]
-    pub fn connect_with_timeout(
+    pub fn connect_with_clock(
         mut stream: S,
         cred: &Credential,
         policy: &impl PeerPolicy,
         peer: &DeviceCert,
         timeout: Duration,
+        clock: C,
     ) -> Result<Self, ChannelError> {
         let rs = dial_key(peer, policy)?;
         let mut hs = HandshakeState::initiator(PROLOGUE, cred.noise_static.clone(), rs);
         write_frame(&mut stream, &write_signed(&mut hs, cred)?)?;
-        let frame = read_frame_before(&mut stream, timeout, None)?;
+        let frame = read_frame_before(&mut stream, &clock, timeout, None)?;
         let (payload, h) = hs.read_message_with_hash(&frame)?;
         let got = verify_peer(&payload, &h, hs.remote_static(), policy)?;
         let peer = expect_subject(got, peer)?;
@@ -544,23 +547,12 @@ impl<S: Read + Write + ReadTimeout> SecureChannel<S> {
             transport,
             peer,
             poisoned: false,
+            clock,
         })
     }
 
-    /// Open a channel as the side that accepted the connection, waiting [`DEFAULT_CONFIRM_TIMEOUT`] for the
-    /// initiator's first message and then for its key confirmation
-    ///
-    /// # Errors
-    /// As [`Self::accept_with_timeout`]
-    pub fn accept(
-        stream: S,
-        cred: &Credential,
-        policy: &impl PeerPolicy,
-    ) -> Result<Self, ChannelError> {
-        Self::accept_with_timeout(stream, cred, policy, DEFAULT_CONFIRM_TIMEOUT)
-    }
-
-    /// Open a channel as the side that accepted the connection. Nothing is written unless the first message
+    /// Open a channel as the side that accepted the connection, reading time from `clock` (the deadlines here
+    /// and in [`Self::recv_before`]). Nothing is written unless the first message
     /// opens for this side's static key and the initiator verifies under the policy. The first message must
     /// come within `timeout` (a silent connection is dropped then, with nothing written), and the channel is
     /// returned once the initiator's key confirmation has come within `timeout` after this side's message;
@@ -576,30 +568,91 @@ impl<S: Read + Write + ReadTimeout> SecureChannel<S> {
     /// the initiator is refused, [`ChannelError::Timeout`] when the first message or the confirmation did not
     /// come,
     /// [`ChannelError::Closed`], [`ChannelError::Io`]
-    pub fn accept_with_timeout(
+    pub fn accept_with_clock(
         mut stream: S,
         cred: &Credential,
         policy: &impl PeerPolicy,
         timeout: Duration,
+        clock: C,
     ) -> Result<Self, ChannelError> {
         let mut hs = HandshakeState::responder(PROLOGUE, cred.noise_static.clone());
-        let first = read_frame_before(&mut stream, timeout, None)?;
+        let first = read_frame_before(&mut stream, &clock, timeout, None)?;
         let (payload, h) = hs.read_message_with_hash(&first)?;
         let peer = verify_peer(&payload, &h, hs.remote_static(), policy)?;
         write_frame(&mut stream, &write_signed(&mut hs, cred)?)?;
         let mut transport = hs.into_transport()?;
-        let frame = read_frame_before(&mut stream, timeout, Some(CONFIRMATION_LEN))?;
+        let frame = read_frame_before(&mut stream, &clock, timeout, Some(CONFIRMATION_LEN))?;
         open_confirmation(&mut transport, &frame)?;
         Ok(Self {
             stream,
             transport,
             peer,
             poisoned: false,
+            clock,
         })
     }
 }
 
-impl<S: Read + Write> SecureChannel<S> {
+/// The constructors without a clock argument: they use [`SystemClock`], so they do not exist on
+/// `wasm32-unknown-unknown`
+#[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
+impl<S: Read + Write + ReadTimeout> SecureChannel<S, SystemClock> {
+    /// Open a channel to the device `peer` certifies, as the side that connected, waiting
+    /// [`DEFAULT_CONFIRM_TIMEOUT`] for the responder's message
+    ///
+    /// # Errors
+    /// As [`Self::connect_with_timeout`]
+    pub fn connect(
+        stream: S,
+        cred: &Credential,
+        policy: &impl PeerPolicy,
+        peer: &DeviceCert,
+    ) -> Result<Self, ChannelError> {
+        Self::connect_with_timeout(stream, cred, policy, peer, DEFAULT_CONFIRM_TIMEOUT)
+    }
+
+    /// As [`Self::connect_with_clock`] with [`SystemClock`]
+    ///
+    /// # Errors
+    /// As [`Self::connect_with_clock`]
+    pub fn connect_with_timeout(
+        stream: S,
+        cred: &Credential,
+        policy: &impl PeerPolicy,
+        peer: &DeviceCert,
+        timeout: Duration,
+    ) -> Result<Self, ChannelError> {
+        Self::connect_with_clock(stream, cred, policy, peer, timeout, SystemClock)
+    }
+
+    /// Open a channel as the side that accepted the connection, waiting [`DEFAULT_CONFIRM_TIMEOUT`] for the
+    /// initiator's first message and then for its key confirmation
+    ///
+    /// # Errors
+    /// As [`Self::accept_with_timeout`]
+    pub fn accept(
+        stream: S,
+        cred: &Credential,
+        policy: &impl PeerPolicy,
+    ) -> Result<Self, ChannelError> {
+        Self::accept_with_timeout(stream, cred, policy, DEFAULT_CONFIRM_TIMEOUT)
+    }
+
+    /// As [`Self::accept_with_clock`] with [`SystemClock`]
+    ///
+    /// # Errors
+    /// As [`Self::accept_with_clock`]
+    pub fn accept_with_timeout(
+        stream: S,
+        cred: &Credential,
+        policy: &impl PeerPolicy,
+        timeout: Duration,
+    ) -> Result<Self, ChannelError> {
+        Self::accept_with_clock(stream, cred, policy, timeout, SystemClock)
+    }
+}
+
+impl<S: Read + Write, C> SecureChannel<S, C> {
     /// Send one message
     ///
     /// # Errors
