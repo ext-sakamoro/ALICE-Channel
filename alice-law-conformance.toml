@@ -70,7 +70,7 @@ reference_repo = "ALICE-DB"
 status = "pass"
 evidence = [
     ".github/workflows/ci.yml test job `.github/workflows/ci.yml#jobs:>test:` with profile release on ubuntu-latest (x86_64) and macos-latest (aarch64): cargo test --profile release with the default and the async feature (with the passed-test floors MIN_PASSED and MIN_PASSED_ASYNC), and the Law tests through scripts/run_tests.sh with minimum counts",
-    "the matrix `.github/workflows/ci.yml#profile: [debug, release]` runs every test step under both profiles; scripts/preflight.sh is generated from ci.yml and runs the debug leg only, so the release leg is checked in CI",
+    "the matrix `.github/workflows/ci.yml#profile: [debug, release]` runs every test step under both profiles; scripts/preflight.sh is generated from ci.yml and runs the release leg too (`scripts/preflight.sh#step \"ci.yml / test: Law tests (semantics goldens and identifier, Noise vectors) [profile=release]\"`)",
 ]
 mutant = "the release leg runs the same binaries as the debug leg under the release profile; the G4 mutant (datagram counter step 2) fails the release leg as it fails the debug one (measured 2026-10-25); scripts/run_tests.sh fails a leg whose binary ran fewer tests than named (scripts/test_run_tests.py)"
 since = ""
