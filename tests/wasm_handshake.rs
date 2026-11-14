@@ -13,6 +13,9 @@
 //!   a blocking stream); the handshake completes and data round-trips both ways; a peer that trickles its
 //!   bytes is cut at the deadline of the fake time
 //!
+//! - anonymous handshake: the sans-I/O state machines, with the responder suspended and resumed across two
+//!   evictions; data both ways
+//!
 //! CI runs this file under Node with `wasm-bindgen-test-runner` and fails when fewer tests pass than it
 //! has; on other targets the same tests run as ordinary tests.
 
@@ -491,4 +494,52 @@ fn recv_before_follows_the_clock_and_a_cut_message_poisons_the_channel() {
     ));
     assert_eq!(wire.state.borrow().taken - before, 3);
     assert!(matches!(ch.send(b"x"), Err(ChannelError::Poisoned)));
+}
+
+/// The anonymous handshake through the sans-I/O state machines, with the responder evicted twice: once while
+/// it waits for the key confirmation, once after it has replied to a message. Only the suspended bytes and the
+/// floor cross each eviction (as a host that handles each message in a separate callback keeps them)
+#[cfg_attr(all(target_arch = "wasm32", target_os = "unknown"), wasm_bindgen_test)]
+#[cfg_attr(not(all(target_arch = "wasm32", target_os = "unknown")), test)]
+fn an_anonymous_handshake_survives_evictions_of_the_responder() {
+    use alice_channel::noise::{SuspendKey, SuspendedTransport};
+    use alice_channel::{AwaitConfirmation, Initiate, Respond};
+
+    let host_key = || SuspendKey::from_bytes(random_seed());
+    let host_key = host_key();
+    let responder_static = Keypair::generate().unwrap();
+    let (init, first) = Initiate::start(responder_static.public()).unwrap();
+    assert_eq!(first.len(), 48);
+
+    // callback 1: the first message comes, the response leaves, the state is suspended
+    let (pending, response) = Respond::new(responder_static).respond(&first).unwrap();
+    let mut stored = pending.suspend(&host_key).unwrap().as_bytes().to_vec();
+    let mut floor = 0;
+
+    let (mut client, confirmation) = init.finish(&response).unwrap();
+    assert_eq!(confirmation.len(), 16);
+
+    // callback 2: the key confirmation, then the first request
+    let copy = SuspendedTransport::from_bytes(&stored).unwrap();
+    let resumed = AwaitConfirmation::resume(&copy, &host_key, floor).unwrap();
+    floor = resumed.next_floor();
+    let server = resumed.floor_persisted().confirm(&confirmation).unwrap();
+    assert_eq!(server.handshake_hash(), client.handshake_hash());
+    stored = server.suspend(&host_key).unwrap().as_bytes().to_vec();
+
+    // callbacks 3..: one request and one reply each, with an eviction between
+    for round in 0..3u8 {
+        let request = client.send(&[round; 8]).unwrap();
+        let copy = SuspendedTransport::from_bytes(&stored).unwrap();
+        let resumed = alice_channel::noise::Transport::resume(&copy, &host_key, floor).unwrap();
+        floor = resumed.next_floor();
+        let mut server = resumed.floor_persisted();
+        assert_eq!(server.recv(&request).unwrap(), [round; 8]);
+        let reply = server.send(&[round ^ 0xff; 5]).unwrap();
+        stored = server.suspend(&host_key).unwrap().as_bytes().to_vec();
+        assert_eq!(client.recv(&reply).unwrap(), [round ^ 0xff; 5]);
+        // the copy before this callback is refused now
+        assert!(alice_channel::noise::Transport::resume(&copy, &host_key, floor).is_err());
+    }
+    assert_eq!(floor, 4);
 }

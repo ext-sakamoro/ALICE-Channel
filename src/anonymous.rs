@@ -14,6 +14,12 @@
 //! The responder's side has no way to name its peer: the type carries no peer certificate. Whatever the
 //! responder needs to decide about a request (a capability, a token) must travel inside the request.
 //! What the responder still sees is outside this layer: the network address and the timing of the connection.
+//!
+//! The handshake itself is the sans-I/O state machines [`Initiate`], [`Respond`] and [`AwaitConfirmation`]: bytes
+//! in, bytes out, no stream and no clock, for a host that handles each message in a separate callback (the
+//! host keeps the deadlines). [`AnonymousChannel`] is built on them and writes the same bytes. A responder
+//! evicted while it waits for the key confirmation can suspend its [`AwaitConfirmation`] and resume it, as a
+//! [`Transport`] can ([`crate::noise::suspend`]).
 
 use std::io::{Read, Write};
 use std::time::Duration;
@@ -24,11 +30,17 @@ use alice_identity::device_cert::DeviceCert;
 use crate::clock::SystemClock;
 use crate::clock::{Clock, DefaultClock};
 use crate::noise::nk::NkHandshakeState;
-use crate::noise::{NoiseError, Transport};
-use crate::{
-    dial_key, open_confirmation, read_frame, read_frame_before, read_frame_within, write_frame,
-    ChannelError, Credential, PeerPolicy, ReadTimeout, CONFIRMATION_LEN, MAX_PAYLOAD,
+use crate::noise::suspend::{self, Phase};
+use crate::noise::{
+    Keypair, NoiseError, ResumeError, Resumed, SuspendKey, SuspendedTransport, Transport,
 };
+use crate::{
+    dial_key, read_frame, read_frame_before, read_frame_within, write_frame, ChannelError,
+    Credential, PeerPolicy, ReadTimeout, CONFIRMATION_LEN, MAX_PAYLOAD,
+};
+
+#[cfg(all(test, not(all(target_arch = "wasm32", target_os = "unknown"))))]
+mod vectors;
 
 /// The Noise prologue of an anonymous channel (different from [`crate::PROLOGUE`], so neither kind of first
 /// message opens as the other)
@@ -36,6 +48,265 @@ pub const ANONYMOUS_PROLOGUE: &[u8] = b"alice-channel anonymous v1";
 
 /// The length of the initiator's first message: its ephemeral key and the tag of the empty payload
 pub const FIRST_MESSAGE_LEN: usize = 32 + CONFIRMATION_LEN;
+
+/// The length of the responder's message: its ephemeral key and the tag of the empty payload
+pub const RESPONSE_LEN: usize = 32 + CONFIRMATION_LEN;
+
+/// The length of the initiator's key confirmation: one empty transport message, only its tag
+pub const KEY_CONFIRMATION_LEN: usize = CONFIRMATION_LEN;
+
+/// Why a step of the anonymous handshake ([`Initiate`], [`Respond`], [`AwaitConfirmation`]) refused its input
+///
+/// The step's state is consumed either way, so a refused handshake is never continued. Each message has
+/// exactly one length, at which its payload is empty, so a payload shows as [`Self::Length`]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AnonymousError {
+    /// The message is not the exact length of its step ([`FIRST_MESSAGE_LEN`], [`RESPONSE_LEN`],
+    /// [`KEY_CONFIRMATION_LEN`])
+    Length {
+        /// the length of the step's message
+        expected: usize,
+        /// the length given
+        got: usize,
+    },
+    /// The message did not open (another static key, another prologue, a changed byte), or the ephemeral key
+    /// could not be made
+    Noise(NoiseError),
+}
+
+impl core::fmt::Display for AnonymousError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::Length { expected, got } => {
+                write!(
+                    f,
+                    "an anonymous handshake message of {got} bytes, not {expected}"
+                )
+            }
+            Self::Noise(e) => write!(f, "{e}"),
+        }
+    }
+}
+
+impl std::error::Error for AnonymousError {}
+
+impl From<NoiseError> for AnonymousError {
+    fn from(e: NoiseError) -> Self {
+        Self::Noise(e)
+    }
+}
+
+/// The stream channel reports a message of the wrong length as a message that does not open, as it always
+/// has
+impl From<AnonymousError> for ChannelError {
+    fn from(e: AnonymousError) -> Self {
+        match e {
+            AnonymousError::Length { .. } => Self::Noise(NoiseError::Decrypt),
+            AnonymousError::Noise(e) => Self::Noise(e),
+        }
+    }
+}
+
+/// A message of exactly `expected` bytes, or [`AnonymousError::Length`]
+const fn exact(message: &[u8], expected: usize) -> Result<(), AnonymousError> {
+    if message.len() == expected {
+        Ok(())
+    } else {
+        Err(AnonymousError::Length {
+            expected,
+            got: message.len(),
+        })
+    }
+}
+
+/// The initiator's side of the anonymous handshake, without I/O and without a clock
+///
+/// [`Self::start`] gives the first message to send, [`Self::finish`] reads the responder's message and gives
+/// the transport and the key confirmation to send. Deadlines belong to the host
+pub struct Initiate {
+    hs: NkHandshakeState,
+}
+
+impl Initiate {
+    /// Start a handshake with the responder whose Noise static key is `responder_static`; returns the state
+    /// and the first message ([`FIRST_MESSAGE_LEN`] bytes)
+    ///
+    /// # Errors
+    /// [`AnonymousError::Noise`] when the ephemeral key cannot be made
+    pub fn start(responder_static: [u8; 32]) -> Result<(Self, Vec<u8>), AnonymousError> {
+        Self::begin(NkHandshakeState::initiator(
+            ANONYMOUS_PROLOGUE,
+            responder_static,
+        ))
+    }
+
+    /// Check the responder's certificate against `policy` and start a handshake with the static key it names
+    ///
+    /// # Errors
+    /// [`ChannelError::UnknownPeer`] / [`ChannelError::Rejected`] when the certificate is refused,
+    /// [`ChannelError::Noise`] when the ephemeral key cannot be made
+    pub fn dial(
+        responder: &DeviceCert,
+        policy: &impl PeerPolicy,
+    ) -> Result<(Self, Vec<u8>), ChannelError> {
+        let rs = dial_key(responder, policy)?;
+        Ok(Self::start(rs)?)
+    }
+
+    /// As [`Self::start`] with a fixed ephemeral key, for test vectors only (a reused ephemeral key voids the
+    /// protocol's guarantees)
+    ///
+    /// # Errors
+    /// As [`Self::start`]
+    pub fn start_with_ephemeral(
+        responder_static: [u8; 32],
+        ephemeral: Keypair,
+    ) -> Result<(Self, Vec<u8>), AnonymousError> {
+        Self::begin(NkHandshakeState::initiator_with_ephemeral(
+            ANONYMOUS_PROLOGUE,
+            responder_static,
+            ephemeral,
+        ))
+    }
+
+    fn begin(mut hs: NkHandshakeState) -> Result<(Self, Vec<u8>), AnonymousError> {
+        // the first payload is empty: nothing of this side travels
+        let first = hs.write_message(&[])?;
+        Ok((Self { hs }, first))
+    }
+
+    /// Read the responder's message ([`RESPONSE_LEN`] bytes, an empty payload); returns the transport and
+    /// the key confirmation to send ([`KEY_CONFIRMATION_LEN`] bytes)
+    ///
+    /// # Errors
+    /// [`AnonymousError::Length`], [`AnonymousError::Noise`] (another static key answered, or a changed
+    /// byte)
+    pub fn finish(self, response: &[u8]) -> Result<(Transport, Vec<u8>), AnonymousError> {
+        let mut hs = self.hs;
+        exact(response, RESPONSE_LEN)?;
+        if !hs.read_message(response)?.is_empty() {
+            // unreachable at RESPONSE_LEN (the payload is the bytes after the ephemeral key and the tag)
+            return Err(AnonymousError::Noise(NoiseError::Decrypt));
+        }
+        let mut transport = hs.into_transport()?;
+        // key confirmation: the responder's handshake ends only once it opens this
+        let confirmation = transport.send(&[])?;
+        Ok((transport, confirmation))
+    }
+}
+
+/// The responder's side of the anonymous handshake, without I/O and without a clock
+///
+/// [`Self::respond`] reads the first message and gives the response to send and an [`AwaitConfirmation`].
+/// It holds only the responder's Noise static key: the initiator is not named
+///
+/// The state is consumed by each step, so a refused message ends the handshake:
+///
+/// ```compile_fail
+/// # use alice_channel::anonymous::Respond;
+/// # use alice_channel::noise::Keypair;
+/// let r = Respond::new(Keypair::from_secret([7; 32]));
+/// let _ = r.respond(&[0; 47]); // refused: AnonymousError::Length
+/// let _ = r.respond(&[0; 48]); // the state was moved: does not compile
+/// ```
+pub struct Respond {
+    hs: NkHandshakeState,
+}
+
+impl Respond {
+    /// A responder with `static_key` as its Noise static key
+    #[must_use]
+    pub fn new(static_key: Keypair) -> Self {
+        Self {
+            hs: NkHandshakeState::responder(ANONYMOUS_PROLOGUE, static_key),
+        }
+    }
+
+    /// As [`Self::new`] with a fixed ephemeral key, for test vectors only
+    #[must_use]
+    pub fn with_ephemeral(static_key: Keypair, ephemeral: Keypair) -> Self {
+        Self {
+            hs: NkHandshakeState::responder_with_ephemeral(
+                ANONYMOUS_PROLOGUE,
+                static_key,
+                ephemeral,
+            ),
+        }
+    }
+
+    /// Read the initiator's first message ([`FIRST_MESSAGE_LEN`] bytes, an empty payload, for this static key
+    /// under [`ANONYMOUS_PROLOGUE`]); returns the state that waits for the key confirmation and the response
+    /// to send ([`RESPONSE_LEN`] bytes). Nothing should be sent when this fails
+    ///
+    /// # Errors
+    /// [`AnonymousError::Length`], [`AnonymousError::Noise`]
+    pub fn respond(self, first: &[u8]) -> Result<(AwaitConfirmation, Vec<u8>), AnonymousError> {
+        let mut hs = self.hs;
+        // the first message is always an ephemeral key and the tag of an empty payload: another length is
+        // refused before any key agreement is done
+        exact(first, FIRST_MESSAGE_LEN)?;
+        if !hs.read_message(first)?.is_empty() {
+            // unreachable at FIRST_MESSAGE_LEN
+            return Err(AnonymousError::Noise(NoiseError::Decrypt));
+        }
+        let response = hs.write_message(&[])?;
+        let transport = hs.into_transport()?;
+        Ok((AwaitConfirmation { transport }, response))
+    }
+}
+
+/// The responder's transport before the initiator's key confirmation has opened; a host evicted while it
+/// waits can suspend it ([`Self::suspend`]) like an open transport
+pub struct AwaitConfirmation {
+    transport: Transport,
+}
+
+impl AwaitConfirmation {
+    /// Open the key confirmation ([`KEY_CONFIRMATION_LEN`] bytes, an empty transport message); returns the
+    /// transport
+    ///
+    /// # Errors
+    /// [`AnonymousError::Length`], [`AnonymousError::Noise`]
+    pub fn confirm(self, confirmation: &[u8]) -> Result<Transport, AnonymousError> {
+        let mut transport = self.transport;
+        exact(confirmation, KEY_CONFIRMATION_LEN)?;
+        if !transport.recv(confirmation)?.is_empty() {
+            // unreachable at KEY_CONFIRMATION_LEN
+            return Err(AnonymousError::Noise(NoiseError::Decrypt));
+        }
+        Ok(transport)
+    }
+
+    /// The handshake hash both sides share
+    #[must_use]
+    pub const fn handshake_hash(&self) -> [u8; 32] {
+        self.transport.handshake_hash()
+    }
+
+    /// Seal the waiting state under the host key (as [`Transport::suspend`], marked as waiting for the key
+    /// confirmation)
+    ///
+    /// # Errors
+    /// [`NoiseError::Randomness`]
+    pub fn suspend(self, key: &SuspendKey) -> Result<SuspendedTransport, NoiseError> {
+        suspend::seal(self.transport, Phase::AwaitingConfirmation, key)
+    }
+
+    /// Open a suspended waiting state (as [`Transport::resume`], with the same floor rule)
+    ///
+    /// # Errors
+    /// As [`Transport::resume`]; [`ResumeError::Phase`] for a copy of an open transport
+    pub fn resume(
+        suspended: &SuspendedTransport,
+        key: &SuspendKey,
+        floor: u64,
+    ) -> Result<Resumed<Self>, ResumeError> {
+        Ok(
+            suspend::open(suspended, Phase::AwaitingConfirmation, key, floor)?
+                .map(|transport| Self { transport }),
+        )
+    }
+}
 
 /// An open channel whose initiator is not named
 ///
@@ -86,17 +357,12 @@ impl<S: Read + Write + ReadTimeout, C: Clock> AnonymousChannel<S, C> {
         timeout: Duration,
         clock: C,
     ) -> Result<Self, ChannelError> {
-        let rs = dial_key(responder, policy)?;
-        let mut hs = NkHandshakeState::initiator(ANONYMOUS_PROLOGUE, rs);
-        // the first payload is empty: nothing of this side travels
-        write_frame(&mut stream, &hs.write_message(&[])?)?;
+        let (init, first) = Initiate::dial(responder, policy)?;
+        write_frame(&mut stream, &first)?;
         let frame = read_frame_before(&mut stream, &clock, timeout, None)?;
-        if !hs.read_message(&frame)?.is_empty() {
-            return Err(ChannelError::Noise(NoiseError::Decrypt));
-        }
-        let mut transport = hs.into_transport()?;
+        let (transport, confirmation) = init.finish(&frame)?;
         // key confirmation: the responder's accept returns only after this
-        write_frame(&mut stream, &transport.send(&[])?)?;
+        write_frame(&mut stream, &confirmation)?;
         Ok(Self {
             stream,
             transport,
@@ -120,17 +386,14 @@ impl<S: Read + Write + ReadTimeout, C: Clock> AnonymousChannel<S, C> {
         timeout: Duration,
         clock: C,
     ) -> Result<Self, ChannelError> {
-        let mut hs = NkHandshakeState::responder(ANONYMOUS_PROLOGUE, cred.noise_static().clone());
-        // the first message is always an ephemeral key and the tag of an empty payload: a frame of another
-        // length is refused from its header, before any body is read or any key agreement is done
+        let respond = Respond::new(cred.noise_static().clone());
+        // a frame of another length than the first message is refused from its header, before any body is
+        // read or any key agreement is done
         let first = read_frame_before(&mut stream, &clock, timeout, Some(FIRST_MESSAGE_LEN))?;
-        if !hs.read_message(&first)?.is_empty() {
-            return Err(ChannelError::Noise(NoiseError::Decrypt));
-        }
-        write_frame(&mut stream, &hs.write_message(&[])?)?;
-        let mut transport = hs.into_transport()?;
-        let frame = read_frame_before(&mut stream, &clock, timeout, Some(CONFIRMATION_LEN))?;
-        open_confirmation(&mut transport, &frame)?;
+        let (pending, response) = respond.respond(&first)?;
+        write_frame(&mut stream, &response)?;
+        let frame = read_frame_before(&mut stream, &clock, timeout, Some(KEY_CONFIRMATION_LEN))?;
+        let transport = pending.confirm(&frame)?;
         Ok(Self {
             stream,
             transport,
