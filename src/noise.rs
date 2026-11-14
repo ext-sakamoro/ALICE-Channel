@@ -23,6 +23,9 @@ use alice_crypto::{random, sha256, x25519};
 use zeroize::{Zeroize, Zeroizing};
 
 pub mod nk;
+pub mod suspend;
+
+pub use suspend::{ResumeError, Resumed, SuspendKey, SuspendedTransport};
 
 /// The protocol name; it is exactly 32 bytes, so it is the initial handshake hash as it stands
 pub const PROTOCOL_NAME: &[u8; 32] = b"Noise_IK_25519_ChaChaPoly_SHA256";
@@ -544,6 +547,7 @@ impl HandshakeState {
                 cipher: recv,
                 handshake_hash,
             },
+            epoch: 0,
         })
     }
 }
@@ -552,6 +556,9 @@ impl HandshakeState {
 pub struct Transport {
     sender: TransportSender,
     receiver: TransportReceiver,
+    /// how many times these keys have been resumed from a [`SuspendedTransport`] (0 after the handshake);
+    /// a suspension carries it, and a resume refuses a copy older than the host's persisted floor
+    epoch: u64,
 }
 
 impl Transport {

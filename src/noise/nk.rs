@@ -106,7 +106,10 @@ impl NkHandshakeState {
         if !self.my_turn() {
             return Err(NoiseError::OutOfTurn);
         }
-        let e = self.fixed_e.take().map_or_else(Keypair::generate, Ok)?;
+        let fixed = self.fixed_e.take();
+        #[cfg(test)]
+        let fixed = fixed.or_else(test_ephemeral::take);
+        let e = fixed.map_or_else(Keypair::generate, Ok)?;
         let mut out = e.public().to_vec();
         // work on a copy, kept only when the whole message is written
         let mut sym = self.symmetric.clone_state();
@@ -211,6 +214,28 @@ impl NkHandshakeState {
                 cipher: recv,
                 handshake_hash,
             },
+            epoch: 0,
         })
+    }
+}
+
+/// A test-only source of the next ephemeral key, so the stream channel built on this handshake can be run with
+/// fixed keys and its bytes recorded (per thread: each side of a test runs on its own thread)
+#[cfg(test)]
+pub(crate) mod test_ephemeral {
+    use super::Keypair;
+    use std::cell::RefCell;
+
+    thread_local! {
+        static NEXT: RefCell<Option<Keypair>> = const { RefCell::new(None) };
+    }
+
+    /// Use `e` as the next ephemeral key this thread's NK handshake writes
+    pub fn set(e: Keypair) {
+        NEXT.with(|n| *n.borrow_mut() = Some(e));
+    }
+
+    pub(super) fn take() -> Option<Keypair> {
+        NEXT.with(|n| n.borrow_mut().take())
     }
 }

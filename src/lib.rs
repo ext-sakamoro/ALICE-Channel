@@ -40,7 +40,10 @@ pub mod semantics;
 
 #[cfg(feature = "async")]
 mod async_channel;
-pub use anonymous::{AnonymousChannel, ANONYMOUS_PROLOGUE, FIRST_MESSAGE_LEN};
+pub use anonymous::{
+    AnonymousChannel, AnonymousError, AwaitConfirmation, Initiate, Respond, ANONYMOUS_PROLOGUE,
+    FIRST_MESSAGE_LEN, KEY_CONFIRMATION_LEN, RESPONSE_LEN,
+};
 #[cfg(feature = "async")]
 pub use async_channel::{AsyncRecvHalf, AsyncSecureChannel, AsyncSendHalf};
 #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]

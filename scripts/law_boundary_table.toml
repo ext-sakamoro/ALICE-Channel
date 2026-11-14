@@ -313,3 +313,51 @@ file = "src/noise/nk.rs"
 name = "write_message"
 class = "handshake message"
 reason = "a Noise NK handshake message and its payload"
+
+[[function]]
+file = "src/anonymous.rs"
+name = "start"
+class = "handshake message"
+reason = "the responder's static public key in, the first NK handshake message (an ephemeral key and an empty sealed payload) out"
+
+[[function]]
+file = "src/anonymous.rs"
+name = "dial"
+class = "handshake message"
+reason = "the first NK handshake message to a certified responder (an ephemeral key and an empty sealed payload)"
+
+[[function]]
+file = "src/anonymous.rs"
+name = "start_with_ephemeral"
+class = "handshake message"
+reason = "as start with a given ephemeral key (the test vectors)"
+
+[[function]]
+file = "src/anonymous.rs"
+name = "finish"
+class = "handshake message"
+reason = "the responder's NK handshake message in, the key confirmation (an empty sealed transport message) out"
+
+[[function]]
+file = "src/anonymous.rs"
+name = "respond"
+class = "handshake message"
+reason = "the initiator's first NK handshake message in, the responder's NK handshake message out"
+
+[[function]]
+file = "src/anonymous.rs"
+name = "confirm"
+class = "transport message"
+reason = "the initiator's key confirmation, an empty message sealed with the channel's cipher"
+
+[[function]]
+file = "src/noise/suspend.rs"
+name = "from_bytes"
+class = "key material"
+reason = "a host key (32 bytes), or a suspended transport: transport keys, nonce counters and handshake hash sealed with ChaCha20-Poly1305 under the host key; no Law-bearing value"
+
+[[function]]
+file = "src/noise/suspend.rs"
+name = "as_bytes"
+class = "key material"
+reason = "a suspended transport: transport keys, nonce counters and handshake hash sealed with ChaCha20-Poly1305 under the host key; no Law-bearing value"
