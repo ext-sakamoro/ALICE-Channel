@@ -41,6 +41,7 @@ All notable changes to ALICE-Channel are documented here. While crates.io is fro
 - 試験の依存: tokio (async の試験) を wasm32-unknown-unknown 以外の dev-dependency にした (tokio はこの target で multi-thread の runtime を build しない)、wasm32-unknown-unknown の dev-dependency に wasm-bindgen-test
 
 ### Changed
+- CI (ALICE-Law G11 (c)): この repository が持つ共有の写しのうち表で移行中の行 12 件を各 owner の main と同じ target の bytes にし、`.github/shared-files-pin` / `.github/g11-table-pin` / `.github/public-text-pin` を ALICE-Law 5e397e3 に上げた (移行中の行の写しがすべて target、指摘 0)
 - 依存: alice-identity を 3.0 にする (失効は戻らない `DropsRevoked`、公開の error enum が non_exhaustive) branch main のまま、lock は 3.0 の commit code の変更は無し (利用している variant を網羅 match していない)
 - 依存: alice-crypto 0.7 (機能ごとの feature に分かれた、既定の build は同じ API)
 - `alice-identity` の要求を 2.0 にする (証明書の version 3、端末の id は subject と device key から導く) handshake は証明書を運ぶので、試験 `a_fixed_handshake_gives_fixed_packets` の init と response の digest を記録し直した (confirmation と data packet、`CHANNEL_SEMANTICS_ID` は変わらない) 試験の証明書は id の引数を取らず、失効の試験は証明書の `device_id()` を失効させる
