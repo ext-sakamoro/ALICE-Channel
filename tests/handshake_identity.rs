@@ -194,7 +194,7 @@ fn a_revoked_device_is_refused_in_the_handshake() {
     let mut policy_b = Policy::knowing(&[&a]);
     let mut list = CertRevocations::new();
     list.accept(
-        RevocationList::issue(&a.master, 1, ISSUED_AT, &[a.cred.cert().device_id()]),
+        RevocationList::issue(&a.master, 1, ISSUED_AT, &[a.cred.cert().device_id()]).unwrap(),
         &a.master.public(),
     )
     .unwrap();

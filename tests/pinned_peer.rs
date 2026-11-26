@@ -424,7 +424,7 @@ fn a_revoked_service_cert_is_refused_at_dial() {
     let cert = service_cert();
     let mut list = CertRevocations::new();
     list.accept(
-        RevocationList::issue(&fixture_master(), 1, ISSUED_AT, &[cert.device_id()]),
+        RevocationList::issue(&fixture_master(), 1, ISSUED_AT, &[cert.device_id()]).unwrap(),
         &fixture_master().public(),
     )
     .unwrap();
@@ -443,7 +443,7 @@ fn a_revoked_service_cert_is_refused_at_dial() {
     let mut empty = CertRevocations::new();
     empty
         .accept(
-            RevocationList::issue(&fixture_master(), 1, ISSUED_AT, &[]),
+            RevocationList::issue(&fixture_master(), 1, ISSUED_AT, &[]).unwrap(),
             &fixture_master().public(),
         )
         .unwrap();
