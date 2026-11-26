@@ -6,6 +6,7 @@ All notable changes to ALICE-Channel are documented here. While crates.io is fro
 
 ### Changed
 - 依存: alice-identity を 4.0 に上げる (`RevocationList::issue` が `Result` を返し、失効の一覧は端末 id 4096 まで) 試験の `issue(..)` は結果を受ける 4.0 の波の間は alice-identity を 4.0 の候補 commit (rev 480d591) に固定し、alice-identity の main に入った後に branch main へ戻す (時限、48 時間以内)
+- `scripts/wasm_clock_required.py` の試験用 crate は alice-identity の要求を repository の Cargo.toml から写す (以前は "3.0" / branch main を文字列で持っていたので、版を上げると alice-identity が 2 版入り `DeviceCert` が別の型になって検査が落ちた)
 
 ### Added
 - `PeerKind` (`Person` / `Service(name)`、`#[non_exhaustive]`) と `PeerPolicy::expected_peer` (既定は `Person`): 相手に期待する証明書の種類を policy が述べ、相手が示した証明書は種類を選ばない `check_cert` は `Person` なら従来どおり `DeviceCert::verify` と失効、`Service(name)` なら `verify_service_cert` (名前・予約した method・その service と完全一致・30 日の上限・失効) で確かめる handshake で相手が示した署名 (`verify_peer`) は `Person` なら `verify_artifact`、`Service(name)` なら alice-identity の `verify_service_artifact` で確かめる 人の policy はサービスの証明書を `Rejected(Cert(ReservedSubject))` で、サービスの policy は人の証明書を `UnknownPeer` で、どちらも dial と handshake の両方で拒む (同じ master 鍵が両方に署名していても) `PinnedPeer` は subject がサービスの DID なら `Service(name)`、それ以外は `Person` を返し、サービスの規則を `check_further` で後から足す形をやめた (`PinnedPeer` の `check_further` は既定の受け入れに戻る)

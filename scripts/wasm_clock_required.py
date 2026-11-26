@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import os
 import shutil
+import tomllib
 import subprocess
 import sys
 from pathlib import Path
@@ -50,7 +51,7 @@ path = "lib.rs"
 
 [dependencies]
 alice-channel = {{ path = "{root}" }}
-alice-identity = {{ version = "3.0", git = "https://github.com/ext-sakamoro/ALICE-Identity", branch = "main" }}
+alice-identity = {identity}
 
 [features]
 {features}
@@ -128,6 +129,21 @@ fn case<S: Read + Write + ReadTimeout>(
 """
 
 
+def identity_dependency() -> str:
+    """The alice-identity requirement of this repository's Cargo.toml, as an inline table
+
+    The fixture states the same requirement as the crate it checks, so both resolve to one alice-identity (two
+    would make `DeviceCert` two different types); it is read here so a version move of this repository cannot
+    leave the fixture on the earlier one.
+    """
+    manifest = tomllib.loads((ROOT / "Cargo.toml").read_text(encoding="utf-8"))
+    spec = manifest.get("dependencies", {}).get("alice-identity")
+    if not isinstance(spec, dict) or not spec:
+        raise SystemExit("::error::Cargo.toml has no alice-identity table under [dependencies]")
+    fields = ", ".join(f"{key} = {value!r}".replace("'", '"') for key, value in spec.items())
+    return "{ " + fields + " }"
+
+
 def target_dir() -> Path:
     return Path(os.environ.get("CARGO_TARGET_DIR", ROOT / "target"))
 
@@ -140,7 +156,7 @@ def write_fixture() -> Path:
     fixture.mkdir(parents=True)
     features = "\n".join(f"{name} = []" for name in [*REFUSED, CONTROL])
     (fixture / "Cargo.toml").write_text(
-        CARGO_TOML.format(root=ROOT.as_posix(), features=features), encoding="utf-8"
+        CARGO_TOML.format(root=ROOT.as_posix(), features=features, identity=identity_dependency()), encoding="utf-8"
     )
     (fixture / "lib.rs").write_text(LIB_RS, encoding="utf-8")
     shutil.copy(ROOT / "Cargo.lock", fixture / "Cargo.lock")
