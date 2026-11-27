@@ -5,7 +5,7 @@ All notable changes to ALICE-Channel are documented here. While crates.io is fro
 ## [Unreleased]
 
 ### Changed
-- 依存: alice-identity を 4.0 に上げる (`RevocationList::issue` が `Result` を返し、失効の一覧は端末 id 4096 まで) 試験の `issue(..)` は結果を受ける 4.0 の波の間は alice-identity を 4.0 の候補 commit (rev 480d591) に固定し、alice-identity の main に入った後に branch main へ戻す (時限、48 時間以内)
+- 依存: alice-identity を 4.0 に上げる (`RevocationList::issue` が `Result` を返し、失効の一覧は端末 id 4096 まで) 試験の `issue(..)` は結果を受ける alice-identity の main が 4.0 (480d591) に進んだので、要求は branch main に戻した (lock は同じ commit 480d591)
 - `scripts/wasm_clock_required.py` の試験用 crate は alice-identity の要求を repository の Cargo.toml から写す (以前は "3.0" / branch main を文字列で持っていたので、版を上げると alice-identity が 2 版入り `DeviceCert` が別の型になって検査が落ちた)
 
 ### Added
